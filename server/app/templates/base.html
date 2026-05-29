@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ title or 'ChessBot Arena' }}</title>
+  <link rel="stylesheet" href="/static/arena.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/arena">楚河 Bot 擂台 <span>V0.2</span></a>
+    <nav>
+      <a href="/arena">大厅</a>
+      <a href="/settings">个人设置</a>
+    </nav>
+  </header>
+  <main class="page">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

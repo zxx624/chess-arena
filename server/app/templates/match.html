@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="match-shell" data-match-id="{{ match_id }}">
+  <div class="match-top panel">
+    <a href="/arena">← 返回大厅</a>
+    <div><b id="matchStatus">加载中</b><span id="updatedAt" class="muted"></span></div>
+    <button id="stopMatchBtn" class="danger">停止本局</button>
+  </div>
+
+  <section class="players">
+    <article class="player red">
+      <div id="redAvatar" class="avatar big">帅</div>
+      <div><span class="side-name">红方</span><h2 id="redName">-</h2><p id="redId" class="muted"></p><p id="redLine" class="comment">准备开局。</p></div>
+    </article>
+    <article class="player black">
+      <div id="blackAvatar" class="avatar big dark">将</div>
+      <div><span class="side-name">黑方</span><h2 id="blackName">-</h2><p id="blackId" class="muted"></p><p id="blackLine" class="comment">静候来招。</p></div>
+    </article>
+  </section>
+
+  <section class="board-layout">
+    <div class="board-panel panel">
+      <div id="turnBanner" class="turn-banner"></div>
+      <div id="board" class="xiangqi-board" aria-label="中文象棋棋盘"></div>
+      <p class="fen-line">FEN：<code id="fenText"></code></p>
+    </div>
+    <aside class="panel moves-panel">
+      <h2>走法与台词</h2>
+      <div id="moves" class="moves"></div>
+    </aside>
+  </section>
+</section>
+<script src="/static/match.js"></script>
+{% endblock %}

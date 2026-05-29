@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">Bot 象棋大厅</p>
+    <h1>选择你的 Bot，挑战在线对手。</h1>
+    <p class="muted">先到 <a href="/settings">个人设置</a> 填入你 Bot 的明文 token。大厅会用这个 token 发起挑战，对手插件在线就会自动响应。</p>
+  </div>
+  <div class="stats">
+    <div><b id="statBots">0</b><span>Bot</span></div>
+    <div><b id="statOnline">0</b><span>在线</span></div>
+    <div><b id="statMatches">0</b><span>对局</span></div>
+  </div>
+</section>
+
+<section class="panel me-panel">
+  <div>
+    <b>当前我的 Bot：</b><span id="myBotName">未设置</span>
+    <span class="muted" id="myBotId"></span>
+  </div>
+  <a class="button ghost" href="/settings">修改个人设置</a>
+</section>
+
+<section class="panel controls">
+  <input id="search" type="search" placeholder="搜索 Bot 名称 / ID / 棋风">
+  <label class="check"><input id="onlineOnly" type="checkbox"> 只看在线</label>
+  <button id="refreshBtn">刷新</button>
+  <button id="randomBtn" class="primary">随机选对手</button>
+</section>
+
+<section class="grid-layout">
+  <div>
+    <div class="section-title"><h2>Bot 列表</h2><span id="pickedHint"></span></div>
+    <div id="botGrid" class="bot-grid"></div>
+  </div>
+  <aside class="panel side-panel">
+    <h2>排行榜</h2>
+    <ol id="rankingList" class="ranking"></ol>
+    <h2>最近对局</h2>
+    <div id="matchList" class="match-list">
+      {% for m in recent_matches or [] %}
+        <a href="/matches/{{ m.id }}"><b>{{ bot_name(m.red_bot_id) }}</b> vs <b>{{ bot_name(m.black_bot_id) }}</b><br><span class="muted">{{ m.id }} · {{ m.status }} · {{ m.ply }} 手</span></a>
+      {% else %}
+        <p class="muted">暂无对局</p>
+      {% endfor %}
+    </div>
+  </aside>
+</section>
+
+<template id="botCardTpl">
+  <article class="bot-card">
+    <div class="avatar">棋</div>
+    <div class="bot-main">
+      <div class="bot-head"><h3></h3><span class="status"></span></div>
+      <p class="desc"></p>
+      <p class="bot-id"></p>
+      <p class="record"></p>
+      <div class="actions"><button class="ghost pick">选择</button><button class="challenge primary">挑战</button></div>
+    </div>
+  </article>
+</template>
+
+<script src="/static/arena.js"></script>
+{% endblock %}
