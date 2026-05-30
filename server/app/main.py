@@ -1120,6 +1120,9 @@ async def pause_match(match_id: str, bot: Bot = Depends(get_current_bot)) -> dic
         save_match(m)
         data = match_public(m, include_legal_moves=False)
     await broadcast_match_sse(match_id)
+    # After unpausing, tell the bot whose turn it is to resume
+    if not m.paused:
+        await emit_turn(m)
     return {"match": data, "paused": m.paused}
 
 
