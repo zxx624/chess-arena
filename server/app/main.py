@@ -85,6 +85,12 @@ class Match:
     paused: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    red_time_left_ms: int = 600_000
+    black_time_left_ms: int = 600_000
+    total_time_ms: int = 600_000
+    last_move_at: float | None = None
+    started_at: float | None = None
+    finished_at: float | None = None
 
 
 bots: dict[str, Bot] = {}
@@ -319,6 +325,12 @@ def load_state_from_db() -> None:
                 paused=bool(row["paused"]),
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
+                red_time_left_ms=row["red_time_left_ms"] or 600_000,
+                black_time_left_ms=row["black_time_left_ms"] or 600_000,
+                total_time_ms=row["total_time_ms"] or 600_000,
+                last_move_at=row["last_move_at"],
+                started_at=row["started_at"],
+                finished_at=row["finished_at"],
             )
 
         for row in conn.execute("SELECT * FROM match_queue"):
@@ -363,8 +375,8 @@ def save_challenge(ch: Challenge) -> None:
 def save_match(m: Match) -> None:
     with db_connect() as conn:
         conn.execute(
-            """INSERT INTO matches(id, red_bot_id, black_bot_id, fen, status, result, winner_bot_id, finish_reason, ply, moves_json, challenge_id, paused, created_at, updated_at)
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO matches(id, red_bot_id, black_bot_id, fen, status, result, winner_bot_id, finish_reason, ply, moves_json, challenge_id, paused, created_at, updated_at, red_time_left_ms, black_time_left_ms, total_time_ms, last_move_at, started_at, finished_at)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  red_bot_id=excluded.red_bot_id,
                  black_bot_id=excluded.black_bot_id,
@@ -378,8 +390,14 @@ def save_match(m: Match) -> None:
                  challenge_id=excluded.challenge_id,
                  paused=excluded.paused,
                  created_at=excluded.created_at,
-                 updated_at=excluded.updated_at""",
-            (m.id, m.red_bot_id, m.black_bot_id, m.fen, m.status, m.result, m.winner_bot_id, m.finish_reason, m.ply, json.dumps(m.moves, ensure_ascii=False), m.challenge_id, int(m.paused), m.created_at, m.updated_at),
+                 updated_at=excluded.updated_at,
+                 red_time_left_ms=excluded.red_time_left_ms,
+                 black_time_left_ms=excluded.black_time_left_ms,
+                 total_time_ms=excluded.total_time_ms,
+                 last_move_at=excluded.last_move_at,
+                 started_at=excluded.started_at,
+                 finished_at=excluded.finished_at""",
+            (m.id, m.red_bot_id, m.black_bot_id, m.fen, m.status, m.result, m.winner_bot_id, m.finish_reason, m.ply, json.dumps(m.moves, ensure_ascii=False), m.challenge_id, int(m.paused), m.created_at, m.updated_at, m.red_time_left_ms, m.black_time_left_ms, m.total_time_ms, m.last_move_at, m.started_at, m.finished_at),
         )
         for mv in m.moves:
             move_id = mv.get("move_id") or f"move_{m.id}_{mv.get('ply')}"
@@ -523,6 +541,9 @@ def match_public(m: Match, include_legal_moves: bool = True) -> dict[str, Any]:
         "paused": m.paused,
         "created_at": m.created_at,
         "updated_at": m.updated_at,
+        "red_time_left_ms": m.red_time_left_ms,
+        "black_time_left_ms": m.black_time_left_ms,
+        "total_time_ms": m.total_time_ms,
     }
     if include_legal_moves and m.status == "active":
         data["legal_moves"] = legal_moves(m.fen)
@@ -1186,6 +1207,33 @@ async def make_move(match_id: str, req: MoveReq, bot: Bot = Depends(get_current_
         expected_bot = m.red_bot_id if turn == RED else m.black_bot_id
         if bot.id != expected_bot:
             raise HTTPException(status_code=403, detail="not your turn")
+        # ── Timer: track elapsed time ──
+        now = time.time()
+        if m.ply == 0:
+            m.started_at = now
+            m.last_move_at = now
+        else:
+            elapsed_ms = int((now - (m.last_move_at or now)) * 1000)
+            if turn == RED:
+                m.red_time_left_ms = max(0, m.red_time_left_ms - elapsed_ms)
+            else:
+                m.black_time_left_ms = max(0, m.black_time_left_ms - elapsed_ms)
+            m.last_move_at = now
+            # Timeout check
+            if (turn == RED and m.red_time_left_ms <= 0) or (turn == BLACK and m.black_time_left_ms <= 0):
+                m.status = "finished"
+                m.result = f"{'black' if turn == RED else 'red'}_win"
+                m.winner_bot_id = m.black_bot_id if turn == RED else m.red_bot_id
+                m.finish_reason = "timeout"
+                m.finished_at = now
+                save_match(m)
+                update_rankings_for_finished_match(m)
+                data = {"match": match_public(m), "timeout": True, "side": turn}
+                participants = [m.red_bot_id, m.black_bot_id]
+                for pid in participants:
+                    await emit(pid, "match_finished", match_public(m))
+                await broadcast_match_sse(match_id)
+                return data
         try:
             new_fen, captured, finished = apply_ucci(m.fen, req.move)
         except RuleError as e:
@@ -1196,17 +1244,19 @@ async def make_move(match_id: str, req: MoveReq, bot: Bot = Depends(get_current_
         m.fen = new_fen
         m.ply += 1
         m.updated_at = time.time()
-        move_rec = {"move_id": new_id("move"), "ply": m.ply, "bot_id": bot.id, "side": turn, "move": req.move, "comment": req.comment, "duration_ms": req.duration_ms, "fen_before": old_fen, "fen_after": new_fen, "captured": captured, "created_at": m.updated_at}
+        move_rec = {"move_id": new_id("move"), "ply": m.ply, "bot_id": bot.id, "side": turn, "move": req.move, "chinese_notation": ucci_to_chinese(req.move, old_fen), "comment": req.comment, "duration_ms": req.duration_ms, "fen_before": old_fen, "fen_after": new_fen, "captured": captured, "created_at": m.updated_at, "red_time_left_ms": m.red_time_left_ms, "black_time_left_ms": m.black_time_left_ms}
         m.moves.append(move_rec)
         if m.ply >= 200 and not finished:
             m.status = "finished"
             m.result = "draw"
             m.finish_reason = "move_limit"
+            m.finished_at = time.time()
         if finished:
             m.status = "finished"
             m.result = f"{turn}_win"
             m.winner_bot_id = bot.id
             m.finish_reason = "capture_general"
+            m.finished_at = time.time()
         save_match(m)
         if m.status == "finished":
             update_rankings_for_finished_match(m)
@@ -1221,3 +1271,48 @@ async def make_move(match_id: str, req: MoveReq, bot: Bot = Depends(get_current_
         await emit_turn(m)
     await broadcast_match_sse(match_id)
     return data
+
+
+# ── UCCI to Chinese notation ──
+RED_COL_CN = ["九", "八", "七", "六", "五", "四", "三", "二", "一"]
+BLK_COL_CN = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+RED_ROW_CN = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
+PIECE_CN = {
+    "r": "車", "R": "車", "h": "馬", "H": "馬", "e": "象", "E": "相",
+    "a": "士", "A": "仕", "k": "将", "K": "帅", "c": "砲", "C": "炮",
+    "p": "卒", "P": "兵",
+}
+
+
+def ucci_to_chinese(ucci: str, fen_before: str) -> str:
+    """Convert UCCI move (e.g. 'b0c2') to Chinese notation like '馬八进七'."""
+    if not ucci or len(ucci) < 4:
+        return ucci
+    from_f = ord(ucci[0]) - 97  # a=0..i=8
+    from_r = int(ucci[1])
+    to_f = ord(ucci[2]) - 97
+    to_r = int(ucci[3])
+    # Get piece from board
+    board, turn, _, _ = parse_fen(fen_before)
+    piece = board[from_r][from_f] if 0 <= from_r < 10 and 0 <= from_f < 9 else ""
+    piece_name = PIECE_CN.get(piece, "?")
+    if turn == RED:
+        src_col = RED_COL_CN[from_f]
+        if from_f == to_f:
+            direction = "进" if to_r < from_r else "退"
+            if piece.upper() in ("H", "E", "A"):
+                return f"{piece_name}{src_col}{direction}{RED_COL_CN[to_f]}"
+            else:
+                return f"{piece_name}{src_col}{direction}{RED_ROW_CN[to_r]}"
+        else:
+            return f"{piece_name}{src_col}平{RED_COL_CN[to_f]}"
+    else:
+        src_col = BLK_COL_CN[from_f]
+        if from_f == to_f:
+            direction = "进" if to_r > from_r else "退"
+            if piece.upper() in ("H", "E", "A"):
+                return f"{piece_name}{src_col}{direction}{BLK_COL_CN[to_f]}"
+            else:
+                return f"{piece_name}{src_col}{direction}{str(to_r)}"
+        else:
+            return f"{piece_name}{src_col}平{BLK_COL_CN[to_f]}"
