@@ -18,6 +18,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+import aiohttp
+
 from .engine import BLACK, INITIAL_FEN, RED, RuleError, apply_ucci, legal_moves, parse_fen
 
 DB_PATH = Path(os.environ.get("CHESS_ARENA_DB", "/mnt/cosmem/gulu1-1415708756/chess-arena/chess_arena.db"))
@@ -80,6 +82,7 @@ class Match:
     ply: int = 0
     moves: list[dict[str, Any]] = field(default_factory=list)
     challenge_id: str | None = None
+    paused: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -128,6 +131,11 @@ class MoveReq(BaseModel):
     move: str = Field(min_length=4, max_length=4)
     comment: str | None = None
     duration_ms: int | None = None
+
+
+class AnalyzeReq(BaseModel):
+    fen: str
+    depth: int = 3
 
 
 def db_connect() -> sqlite3.Connection:
@@ -241,6 +249,7 @@ def init_db() -> None:
         ensure_columns(conn, "matches", {
             "winner_bot_id": "TEXT",
             "finish_reason": "TEXT",
+            "paused": "INTEGER DEFAULT 0",
             "red_time_left_ms": "INTEGER",
             "black_time_left_ms": "INTEGER",
             "total_time_ms": "INTEGER",
@@ -307,6 +316,7 @@ def load_state_from_db() -> None:
                 ply=row["ply"],
                 moves=moves,
                 challenge_id=row["challenge_id"],
+                paused=bool(row["paused"]),
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )
@@ -353,8 +363,8 @@ def save_challenge(ch: Challenge) -> None:
 def save_match(m: Match) -> None:
     with db_connect() as conn:
         conn.execute(
-            """INSERT INTO matches(id, red_bot_id, black_bot_id, fen, status, result, winner_bot_id, finish_reason, ply, moves_json, challenge_id, created_at, updated_at)
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO matches(id, red_bot_id, black_bot_id, fen, status, result, winner_bot_id, finish_reason, ply, moves_json, challenge_id, paused, created_at, updated_at)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  red_bot_id=excluded.red_bot_id,
                  black_bot_id=excluded.black_bot_id,
@@ -366,9 +376,10 @@ def save_match(m: Match) -> None:
                  ply=excluded.ply,
                  moves_json=excluded.moves_json,
                  challenge_id=excluded.challenge_id,
+                 paused=excluded.paused,
                  created_at=excluded.created_at,
                  updated_at=excluded.updated_at""",
-            (m.id, m.red_bot_id, m.black_bot_id, m.fen, m.status, m.result, m.winner_bot_id, m.finish_reason, m.ply, json.dumps(m.moves, ensure_ascii=False), m.challenge_id, m.created_at, m.updated_at),
+            (m.id, m.red_bot_id, m.black_bot_id, m.fen, m.status, m.result, m.winner_bot_id, m.finish_reason, m.ply, json.dumps(m.moves, ensure_ascii=False), m.challenge_id, int(m.paused), m.created_at, m.updated_at),
         )
         for mv in m.moves:
             move_id = mv.get("move_id") or f"move_{m.id}_{mv.get('ply')}"
@@ -509,6 +520,7 @@ def match_public(m: Match, include_legal_moves: bool = True) -> dict[str, Any]:
         "ply": m.ply,
         "moves": m.moves,
         "challenge_id": m.challenge_id,
+        "paused": m.paused,
         "created_at": m.created_at,
         "updated_at": m.updated_at,
     }
@@ -827,7 +839,7 @@ async def sse_match(request: Request, match_id: str) -> StreamingResponse:
 def match_sse_payload(m: Match) -> dict[str, Any]:
     data = match_public(m, include_legal_moves=False)
     last_move = m.moves[-1] if m.moves else None
-    return {"fen": m.fen, "ply": m.ply, "moves": m.moves, "status": m.status, "result": m.result, "last_move": last_move}
+    return {"fen": m.fen, "ply": m.ply, "moves": m.moves, "status": m.status, "result": m.result, "paused": m.paused, "last_move": last_move}
 
 
 async def broadcast_match_sse(match_id: str) -> None:
@@ -1092,6 +1104,45 @@ async def stop_match(match_id: str, bot: Bot = Depends(get_current_bot)) -> dict
     return {"match": data, "stopped": True}
 
 
+@app.post("/api/matches/{match_id}/pause")
+async def pause_match(match_id: str, bot: Bot = Depends(get_current_bot)) -> dict[str, Any]:
+    """Toggle paused state for a match. Requires bot auth (either participant)."""
+    async with state_lock:
+        m = matches.get(match_id)
+        if not m:
+            raise HTTPException(status_code=404, detail="match not found")
+        if bot.id not in (m.red_bot_id, m.black_bot_id):
+            raise HTTPException(status_code=403, detail="not a participant")
+        if m.status != "active":
+            raise HTTPException(status_code=400, detail="match not active")
+        m.paused = not m.paused
+        m.updated_at = time.time()
+        save_match(m)
+        data = match_public(m, include_legal_moves=False)
+    await broadcast_match_sse(match_id)
+    return {"match": data, "paused": m.paused}
+
+
+@app.post("/api/analyze")
+async def analyze(req: AnalyzeReq, bot_id: str = Depends(x_bot_token)) -> dict[str, Any]:
+    """Proxy analyze request to the xqwlight engine server."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                "http://127.0.0.1:8789/analyze",
+                json={"fen": req.fen, "depth": req.depth},
+            ) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    raise HTTPException(status_code=502, detail=f"engine error: {text[:200]}")
+                return json.loads(text)
+    except aiohttp.ClientError as exc:
+        raise HTTPException(status_code=502, detail=f"engine unreachable: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"engine error: {exc}")
+
+
 @app.post("/api/matches/{match_id}/move")
 async def make_move(match_id: str, req: MoveReq, bot: Bot = Depends(get_current_bot)) -> dict[str, Any]:
     async with state_lock:
@@ -1100,6 +1151,8 @@ async def make_move(match_id: str, req: MoveReq, bot: Bot = Depends(get_current_
             raise HTTPException(status_code=404, detail="match not found")
         if m.status != "active":
             raise HTTPException(status_code=400, detail="match not active")
+        if m.paused:
+            raise HTTPException(status_code=400, detail="match is paused")
         _, turn, _, _ = parse_fen(m.fen)
         expected_bot = m.red_bot_id if turn == RED else m.black_bot_id
         if bot.id != expected_bot:
