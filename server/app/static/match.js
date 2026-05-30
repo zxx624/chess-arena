@@ -36,7 +36,10 @@ function render(m){
   renderAvatarEl($('#redAvatar'),m.red_bot_name||'帅',m.red_bot_avatar_url,'big'); renderAvatarEl($('#blackAvatar'),m.black_bot_name||'将',m.black_bot_avatar_url,'big dark');
   matchPaused=!!m.paused;
   updateTurnBannerContent(m.status,m.turn,m.ply,m.paused,m.result,m.red_bot_name,m.black_bot_name);
-  $('#fenText').textContent=m.fen; renderBoard(m.fen); renderCaptured(); renderMoves(m);
+  if(!isReplayLocked()){
+    $('#fenText').textContent=m.fen; renderBoard(m.fen); renderCaptured();
+  }
+  renderMoves(m);
 }
 function updateTurnBannerContent(status,turn,ply,paused,result,redName,blackName){
   if(status==='active'){
@@ -163,7 +166,7 @@ function connectSSE(){
       try{
         const d=JSON.parse(e.data);
         // Core rendering must never be blocked by optional audio/popup features.
-        if(d.fen){
+        if(d.fen&&!isReplayLocked()){
           try{renderBoard(d.fen); $('#fenText').textContent=d.fen;}catch(boardErr){console.error('board render error',boardErr)}
         }
         if(d.status!=null&&d.ply!=null){
@@ -181,7 +184,7 @@ function connectSSE(){
             // Rebuild captured lists from moves
             capturedByRed=[]; capturedByBlack=[];
             (d.moves||[]).forEach(function(mv){if(mv.captured){if(mv.side==='red')capturedByRed.push(mv.captured);else capturedByBlack.push(mv.captured);}});
-            renderCaptured();
+            if(!isReplayLocked())renderCaptured();
           }catch(movesErr){console.error('moves render error',movesErr)}
         }
         if(d.ply!=null&&d.status==='active'){
@@ -215,7 +218,7 @@ setTimeout(() => { if (typeof createAudioToggles === 'function') createAudioTogg
 setTimeout(()=>connectSSE(),500);
 // Fallback polling (every 5s, only if SSE hasn't updated recently)
 let lastSseUpdate=Date.now();
-setInterval(()=>{if(Date.now()-lastSseUpdate>10000){load().catch(()=>{})}},5000);
+setInterval(()=>{if(!isReplayLocked()&&Date.now()-lastSseUpdate>10000){load().catch(()=>{})}},5000);
 
 // ═══════════════════════════════════════════
 // ── Replay Controller ──
@@ -226,9 +229,16 @@ let replayStep=-1;      // -1 = initial position, 0..N-1 = after move N
 let replayPlaying=false;
 let replayTimer=null;
 let replaySpeed=1000;
+let replayUserActive=false; // user is inspecting replay; live/fallback refresh must not overwrite board
 let allMoves=[];        // cache of moves for replay
 let gameIsOver=false;   // track if game has ended
 let popupShown=false;   // prevent duplicate popup
+function isReplayLocked(){
+  return gameIsOver&&replayUserActive&&replayStep<allMoves.length-1;
+}
+function setReplayUserActive(active){
+  replayUserActive=!!active;
+}
 
 // ── FEN utilities ──
 function parseFenBoard(fen){
@@ -290,6 +300,7 @@ function initReplay(moves){
   fenHistory=buildFenHistory(allMoves,INITIAL_FEN);
   replayStep=allMoves.length-1; // default to last position (show final state)
   replayPlaying=false;
+  setReplayUserActive(false);
   $('#replayBar').classList.add('visible');
   updateReplayUI();
   updateReplayBoard();
@@ -354,17 +365,20 @@ function updateReplayBoard(){
 }
 function goToStep(n){
   replayStep=Math.max(-1,Math.min(allMoves.length-1,n));
+  setReplayUserActive(replayStep<allMoves.length-1);
   updateReplayUI();
   updateReplayBoard();
 }
 function startReplayPlayback(){
   if(replayPlaying)return;
   if(replayStep>=allMoves.length-1)goToStep(-1); // restart from beginning
+  setReplayUserActive(true);
   replayPlaying=true;
   updateReplayUI();
   replayTimer=setInterval(function(){
     if(replayStep>=allMoves.length-1){
       stopReplayPlayback();
+      setReplayUserActive(false);
       return;
     }
     goToStep(replayStep+1);
@@ -397,7 +411,7 @@ $('#replayStartBtn').onclick=function(){stopReplayPlayback();goToStep(-1);};
 $('#replayPrevBtn').onclick=function(){stopReplayPlayback();goToStep(replayStep-1);};
 $('#replayPlayBtn').onclick=function(){toggleReplayPlayback();};
 $('#replayNextBtn').onclick=function(){stopReplayPlayback();goToStep(replayStep+1);};
-$('#replayEndBtn').onclick=function(){stopReplayPlayback();goToStep(allMoves.length-1);};
+$('#replayEndBtn').onclick=function(){stopReplayPlayback();setReplayUserActive(false);goToStep(allMoves.length-1);};
 $('#replaySpeed').onchange=function(){replaySpeed=parseInt(this.value);if(replayPlaying){stopReplayPlayback();startReplayPlayback();}};
 
 // ═══════════════════════════════════════════
@@ -446,8 +460,8 @@ function showGameOverPopup(result,reason,redName,blackName,redAv,blackAv){
   overlay.classList.remove('closing');
   // Particles
   spawnParticles(result);
-  // Init replay
-  if(allMoves.length>0)initReplay(allMoves);
+  // Init replay once; don't reset the user's current replay position.
+  if(allMoves.length>0&&!replayUserActive)initReplay(allMoves);
 }
 function hideGameOverPopup(){
   const overlay=$('#gameOverPopup');
@@ -628,7 +642,11 @@ $('#exportCopyBtn').onclick=function(){
 // ── Game Over Detection (inline in SSE handler) ──
 // ═══════════════════════════════════════════
 function checkGameOver(status,result,reason,moves,redName,blackName,redAv,blackAv){
-  if(status==='active'||gameIsOver)return;
+  if(status==='active')return;
+  if(gameIsOver){
+    if(!allMoves.length&&moves&&moves.length)allMoves=moves;
+    return;
+  }
   gameIsOver=true;
   allMoves=moves||[];
   setTimeout(function(){
