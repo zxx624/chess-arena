@@ -20,11 +20,18 @@ let voiceEnabled = true;
 
 // ── Web Audio Engine ──
 let audioCtx = null;
+let audioUnlocked = false;
+function unlockAudio() {
+  audioUnlocked = true;
+  const ctx = getCtx();
+  if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+}
 function getCtx() {
+  if (!audioUnlocked) return null;
   if (!audioCtx) {
     try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; }
   }
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
   return audioCtx;
 }
 
@@ -339,9 +346,8 @@ function createAudioToggles(containerEl) {
     sfxEnabled = !sfxEnabled;
     this.textContent = sfxEnabled ? '🔊 音效' : '🔇 音效';
     if (sfxEnabled) {
-      // tiny click to confirm audio context is working
-      const ctx = getCtx();
-      if (ctx && ctx.state === 'suspended') ctx.resume();
+      // User click unlocks Web Audio for later SSE move sounds.
+      unlockAudio();
       this.classList.remove('off');
     } else {
       this.classList.add('off');

@@ -1,7 +1,7 @@
 const matchId=document.querySelector('.match-shell').dataset.matchId;
 const STORAGE_KEY='chessArenaClientSettings';
 const $=s=>document.querySelector(s);
-const names={r:'車',h:'馬',e:'象',a:'士',k:'将',c:'砲',p:'卒',R:'車',H:'馬',E:'相',A:'仕',K:'帅',C:'炮',P:'兵'};
+const names={r:'車',n:'馬',h:'馬',b:'象',e:'象',a:'士',k:'将',c:'砲',p:'卒',R:'車',N:'馬',H:'馬',B:'相',E:'相',A:'仕',K:'帅',C:'炮',P:'兵'};
 function cfg(){try{return JSON.parse(localStorage.getItem(STORAGE_KEY)||'{}')}catch{return {}}}
 function authHeaders(){const t=(cfg().token||'').trim();return t?{Authorization:'Bearer '+t}:{}}
 function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
@@ -162,28 +162,36 @@ function connectSSE(){
       bar.style.color='var(--green)';
       try{
         const d=JSON.parse(e.data);
-        // Audio: process moves and status changes
-        if(typeof handleSSEAudio==='function')handleSSEAudio(d);
-        if(d.fen){renderBoard(d.fen); $('#fenText').textContent=d.fen;}
-        if(d.status!=null&&d.result!=null&&d.ply!=null){
-          updateStatusFromSSE(d.status,d.result,d.ply,d.paused);
-          // Game-over detection: trigger popup when status changes to non-active
-          if(d.status!=='active'&&!gameIsOver&&d.moves&&d.moves.length>0){
-            checkGameOver(d.status,d.result,'',
-              d.moves,cachedRedName,cachedBlackName,cachedRedAvatar,cachedBlackAvatar);
-          }
+        // Core rendering must never be blocked by optional audio/popup features.
+        if(d.fen){
+          try{renderBoard(d.fen); $('#fenText').textContent=d.fen;}catch(boardErr){console.error('board render error',boardErr)}
+        }
+        if(d.status!=null&&d.ply!=null){
+          try{
+            updateStatusFromSSE(d.status,d.result,d.ply,d.paused);
+            if(d.status!=='active'&&!gameIsOver&&d.moves&&d.moves.length>0){
+              checkGameOver(d.status,d.result,'',
+                d.moves,cachedRedName,cachedBlackName,cachedRedAvatar,cachedBlackAvatar);
+            }
+          }catch(statusErr){console.error('status render error',statusErr)}
         }
         if(d.moves){
-          renderMovesFromSSE(d.moves,d.last_move||d.moves[d.moves.length-1]);
-          // Rebuild captured lists from moves
-          capturedByRed=[]; capturedByBlack=[];
-          (d.moves||[]).forEach(function(mv){if(mv.captured){if(mv.side==='red')capturedByRed.push(mv.captured);else capturedByBlack.push(mv.captured);}});
-          renderCaptured();
+          try{
+            renderMovesFromSSE(d.moves,d.last_move||d.moves[d.moves.length-1]);
+            // Rebuild captured lists from moves
+            capturedByRed=[]; capturedByBlack=[];
+            (d.moves||[]).forEach(function(mv){if(mv.captured){if(mv.side==='red')capturedByRed.push(mv.captured);else capturedByBlack.push(mv.captured);}});
+            renderCaptured();
+          }catch(movesErr){console.error('moves render error',movesErr)}
         }
         if(d.ply!=null&&d.status==='active'){
-          matchPaused=!!d.paused;
-          updateTurnBanner(d.ply,matchPaused);
+          try{
+            matchPaused=!!d.paused;
+            updateTurnBanner(d.ply,matchPaused);
+          }catch(turnErr){console.error('turn render error',turnErr)}
         }
+        // Audio is optional; it must not break board updates.
+        try{if(typeof handleSSEAudio==='function')handleSSEAudio(d);}catch(audioErr){console.warn('audio error',audioErr)}
       }catch(err){console.error('SSE parse error',err)}
     });
     es.addEventListener('open',()=>{
