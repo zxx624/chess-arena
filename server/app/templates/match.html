@@ -5,6 +5,7 @@
     <a href="/arena">← 返回大厅</a>
     <div><b id="matchStatus">加载中</b><span id="updatedAt" class="muted"></span></div>
     <div class="match-actions">
+      <div id="audioToggleContainer" class="audio-toggles"></div>
       <button id="pauseMatchBtn" class="ghost">暂停/继续</button>
       <button id="stopMatchBtn" class="danger">停止本局</button>
     </div>
@@ -34,8 +35,76 @@
     <aside class="panel moves-panel">
       <h2>走法与台词</h2>
       <div id="moves" class="moves"></div>
+      <div class="export-section">
+        <button id="exportUcciBtn">📋 导出 UCCI</button>
+        <button id="exportChineseBtn">📋 导出中文棋谱</button>
+        <button id="exportDownloadBtn">💾 下载棋谱</button>
+      </div>
     </aside>
   </section>
+
+  <!-- Replay Control Bar -->
+  <div id="replayBar" class="replay-bar">
+    <div class="replay-row">
+      <button id="replayStartBtn" class="replay-btn" title="开头 (Home)">⏮</button>
+      <button id="replayPrevBtn" class="replay-btn" title="上一步 (←)">⏪</button>
+      <button id="replayPlayBtn" class="replay-btn" title="播放/暂停 (空格)">▶</button>
+      <button id="replayNextBtn" class="replay-btn" title="下一步 (→)">⏩</button>
+      <button id="replayEndBtn" class="replay-btn" title="结尾 (End)">⏭</button>
+      <span class="divider"></span>
+      <span class="replay-info" id="replayInfo">0 / 0 步</span>
+      <span class="replay-move-label" id="replayMoveLabel"></span>
+      <span class="divider"></span>
+      <span class="replay-speed">
+        速度
+        <select id="replaySpeed">
+          <option value="2000">0.5×</option>
+          <option value="1000" selected>1×</option>
+          <option value="500">2×</option>
+          <option value="250">4×</option>
+        </select>
+      </span>
+      <span class="replay-kbd-hint">⌨ 左右键步进 · 空格播放</span>
+    </div>
+  </div>
+
+  <!-- Victory/Defeat Popup -->
+  <div id="gameOverPopup" class="popup-overlay">
+    <div class="popup-dialog">
+      <div class="popup-icon" id="popupIcon"></div>
+      <h2 class="popup-title" id="popupTitle"></h2>
+      <p class="popup-reason" id="popupReason"></p>
+      <div class="popup-players">
+        <div class="popup-player" id="popupRedPlayer">
+          <div id="popupRedAvatar" class="avatar"></div>
+          <b id="popupRedName"></b>
+        </div>
+        <span class="popup-vs">VS</span>
+        <div class="popup-player" id="popupBlackPlayer">
+          <div id="popupBlackAvatar" class="avatar dark"></div>
+          <b id="popupBlackName"></b>
+        </div>
+      </div>
+      <div class="popup-actions">
+        <button id="popupRematchBtn" class="primary">🔄 再来一局</button>
+        <button id="popupLobbyBtn">🏠 返回大厅</button>
+      </div>
+    </div>
+  </div>
+  <div id="popupParticles" class="popup-particles"></div>
+
+  <!-- Export Dialog -->
+  <div id="exportDialog" class="export-dialog" style="display:none">
+    <div class="export-dialog-inner">
+      <h3 id="exportTitle">棋谱</h3>
+      <pre id="exportContent"></pre>
+      <div class="export-dialog-actions">
+        <button id="exportCopyBtn" class="primary">📋 复制到剪贴板</button>
+        <button id="exportCloseBtn">关闭</button>
+      </div>
+    </div>
+  </div>
 </section>
+<script src="/static/audio.js"></script>
 <script src="/static/match.js"></script>
 {% endblock %}
