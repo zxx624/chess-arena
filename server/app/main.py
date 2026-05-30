@@ -530,7 +530,10 @@ def match_public(m: Match, include_legal_moves: bool = True) -> dict[str, Any]:
 
 
 def admin_match_summary(m: Match) -> dict[str, Any]:
-    return {k: v for k, v in match_public(m, include_legal_moves=False).items() if k != "moves"} | {"move_count": len(m.moves)}
+    summary = {k: v for k, v in match_public(m, include_legal_moves=False).items() if k != "moves"} | {"move_count": len(m.moves)}
+    if m.winner_bot_id:
+        summary["winner_bot_name"] = bot_name(m.winner_bot_id)
+    return summary
 
 
 def fmt_ts(ts: float | None) -> str:
@@ -1038,6 +1041,28 @@ async def api_admin_match(match_id: str) -> dict[str, Any]:
     return match_public(m, include_legal_moves=False)
 
 
+@app.post("/api/admin/matches/backfill_rankings")
+async def backfill_rankings() -> dict[str, Any]:
+    """Backfill rankings for all finished matches that haven't been scored yet."""
+    finished = [m for m in matches.values() if m.status == "finished" and m.result]
+    already = set()
+    with db_connect() as conn:
+        rows = conn.execute("SELECT DISTINCT match_id FROM rating_history").fetchall()
+        already = {r["match_id"] for r in rows}
+    updated = 0
+    skipped = 0
+    for m in finished:
+        if m.id in already:
+            skipped += 1
+            continue
+        if m.result == "stopped":
+            skipped += 1
+            continue
+        update_rankings_for_finished_match(m)
+        updated += 1
+    return {"updated": updated, "skipped": skipped, "total_finished": len(finished)}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def arena_home(request: Request) -> HTMLResponse:
     recent_matches = sorted(matches.values(), key=lambda m: m.updated_at, reverse=True)[:20]
@@ -1097,6 +1122,7 @@ async def stop_match(match_id: str, bot: Bot = Depends(get_current_bot)) -> dict
         m.finish_reason = f"stopped_by_{bot.id}"
         m.updated_at = time.time()
         save_match(m)
+        update_rankings_for_finished_match(m)
         data = match_public(m, include_legal_moves=False)
         participants = [m.red_bot_id, m.black_bot_id]
     for pid in participants:
@@ -1172,6 +1198,10 @@ async def make_move(match_id: str, req: MoveReq, bot: Bot = Depends(get_current_
         m.updated_at = time.time()
         move_rec = {"move_id": new_id("move"), "ply": m.ply, "bot_id": bot.id, "side": turn, "move": req.move, "comment": req.comment, "duration_ms": req.duration_ms, "fen_before": old_fen, "fen_after": new_fen, "captured": captured, "created_at": m.updated_at}
         m.moves.append(move_rec)
+        if m.ply >= 200 and not finished:
+            m.status = "finished"
+            m.result = "draw"
+            m.finish_reason = "move_limit"
         if finished:
             m.status = "finished"
             m.result = f"{turn}_win"

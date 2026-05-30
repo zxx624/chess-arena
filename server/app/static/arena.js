@@ -29,7 +29,7 @@ function renderBots(){
     el.querySelector('.bot-id').textContent=b.bot_id; const st=el.querySelector('.status'); st.textContent=b.online_status==='online'?'在线':'离线'; st.classList.toggle('online',b.online_status==='online');
     el.querySelector('.record').textContent=`Rating ${r.rating} · ${r.games}局 ${r.wins}胜/${r.losses}负/${r.draws}和`;
     el.querySelector('.pick').onclick=()=>{state.selected=b.bot_id;$('#pickedHint').textContent=`已选择：${b.name}`;renderBots()};
-    const btn=el.querySelector('.challenge'); btn.disabled=!!isMe; btn.textContent=isMe?'自己':'挑战'; btn.onclick=()=>challenge(b);
+    const btn=el.querySelector('.challenge'); const isOffline=b.online_status!=='online'; btn.disabled=!!isMe||isOffline; btn.textContent=isMe?'自己':isOffline?'离线':'挑战'; if(!isOffline&&!isMe)btn.onclick=()=>challenge(b);
             el.querySelector('.stats-link').href=`/stats/${b.bot_id}`;
     grid.appendChild(el);
   })
@@ -44,7 +44,7 @@ async function challenge(opponent){
 }
 async function waitMatch(challengeId){for(let i=0;i<40;i++){const data=await json('/api/admin/matches?limit=20'); const m=(data.matches||[]).find(x=>x.challenge_id===challengeId); if(m){location.href='/matches/'+m.match_id;return} await new Promise(r=>setTimeout(r,1000))} alert('已发出挑战，但暂未生成对局。对手插件可能没在线或没自动接挑战。')}
 function renderRankings(){const ol=$('#rankingList');ol.innerHTML='';state.rankings.forEach(r=>{const li=document.createElement('li');li.textContent=`${r.name} · ${r.rating} · ${r.games}局`;ol.appendChild(li)}); if(!state.rankings.length)ol.innerHTML='<li class="muted">暂无排行</li>'}
-function renderMatches(ms){const box=$('#matchList');box.innerHTML='';if(!ms.length){box.innerHTML='<p class="muted">暂无对局</p>';return}ms.forEach(m=>{const a=document.createElement('a');a.href=`/matches/${m.match_id}`;a.innerHTML=`<b>${m.red_bot_name}</b> vs <b>${m.black_bot_name}</b><br><span class="muted">${m.status} · ${m.ply} 手</span>`;box.appendChild(a)})}
+function renderMatches(ms){const box=$('#matchList');box.innerHTML='';if(!ms.length){box.innerHTML='<p class="muted">暂无对局</p>';return}ms.forEach(m=>{const a=document.createElement('a');a.href=`/matches/${m.match_id}`;let result='';if(m.result==='red_win')result='🔴红胜';else if(m.result==='black_win')result='⚫黑胜';else if(m.result==='draw')result='🤝和棋';else if(m.status==='active')result='▶进行中';else result=m.status;a.innerHTML=`<b>${m.red_bot_name}</b> vs <b>${m.black_bot_name}</b><br><span class="muted">${result} · ${m.ply} 手</span>`;box.appendChild(a)})}
 $('#search').addEventListener('input',renderBots);$('#onlineOnly').addEventListener('change',renderBots);$('#refreshBtn').onclick=load;
 $('#randomBtn').onclick=()=>{const pool=state.bots.filter(b=>(!state.me||b.bot_id!==state.me.bot_id)&&(!$('#onlineOnly').checked||b.online_status==='online'));if(!pool.length)return;const b=pool[Math.floor(Math.random()*pool.length)];state.selected=b.bot_id;$('#pickedHint').textContent=`随机选中：${b.name}`;renderBots()};
 
