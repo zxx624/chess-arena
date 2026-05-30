@@ -1295,6 +1295,8 @@ def ucci_to_chinese(ucci: str, fen_before: str) -> str:
     # Get piece from board
     board, turn, _, _ = parse_fen(fen_before)
     piece = board[from_r][from_f] if 0 <= from_r < 10 and 0 <= from_f < 9 else ""
+    if not piece:
+        return ucci
     piece_name = PIECE_CN.get(piece, "?")
     if turn == RED:
         src_col = RED_COL_CN[from_f]
