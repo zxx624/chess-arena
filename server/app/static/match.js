@@ -121,12 +121,6 @@ function updateStatusFromSSE(status,result,ply,paused){
   matchPaused=!!paused;
   if(status!=='active'){
     $('#turnBanner').textContent=`对局已结束：${result||status}`;
-    // Trigger game-over popup
-    if(!gameIsOver){
-      // We'll get moves from the SSE data separately, but set a flag for checkGameOver
-      window._sseEndStatus=status;
-      window._sseEndResult=result;
-    }
   }else if(paused){
     $('#turnBanner').textContent='⏸ 对局已暂停';
   }
@@ -171,7 +165,14 @@ function connectSSE(){
         // Audio: process moves and status changes
         if(typeof handleSSEAudio==='function')handleSSEAudio(d);
         if(d.fen){renderBoard(d.fen); $('#fenText').textContent=d.fen;}
-        if(d.status!=null&&d.result!=null&&d.ply!=null){updateStatusFromSSE(d.status,d.result,d.ply,d.paused);}
+        if(d.status!=null&&d.result!=null&&d.ply!=null){
+          updateStatusFromSSE(d.status,d.result,d.ply,d.paused);
+          // Game-over detection: trigger popup when status changes to non-active
+          if(d.status!=='active'&&!gameIsOver&&d.moves&&d.moves.length>0){
+            checkGameOver(d.status,d.result,'',
+              d.moves,cachedRedName,cachedBlackName,cachedRedAvatar,cachedBlackAvatar);
+          }
+        }
         if(d.moves){
           renderMovesFromSSE(d.moves,d.last_move||d.moves[d.moves.length-1]);
           // Rebuild captured lists from moves
@@ -616,32 +617,16 @@ $('#exportCopyBtn').onclick=function(){
 };
 
 // ═══════════════════════════════════════════
-// ── Game Over Detection Hooks ──
+// ── Game Over Detection (inline in SSE handler) ──
 // ═══════════════════════════════════════════
 function checkGameOver(status,result,reason,moves,redName,blackName,redAv,blackAv){
   if(status==='active'||gameIsOver)return;
   gameIsOver=true;
   allMoves=moves||[];
-  // Show popup with slight delay for dramatic effect
   setTimeout(function(){
     showGameOverPopup(result,reason,redName,blackName,redAv,blackAv);
   },600);
 }
-
-// ── Patch the SSE match_state handler inline by wrapping after connectSSE ──
-// The SSE handler already calls updateStatusFromSSE which sets _sseEndStatus.
-// We listen inside the SSE for moves and trigger checkGameOver when done.
-const _origRenderMovesFromSSE=renderMovesFromSSE;
-renderMovesFromSSE=function(moves,last){
-  _origRenderMovesFromSSE(moves,last);
-  // If we have end status flag and moves, trigger game over
-  if(window._sseEndStatus&&window._sseEndResult&&moves&&moves.length>0&&!gameIsOver){
-    checkGameOver(window._sseEndStatus,window._sseEndResult,'',
-      moves,cachedRedName,cachedBlackName,cachedRedAvatar,cachedBlackAvatar);
-    delete window._sseEndStatus;
-    delete window._sseEndResult;
-  }
-};
 
 // ── Delayed initial load check for games already over ──
 setTimeout(async function(){
