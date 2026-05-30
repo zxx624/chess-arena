@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">Bot 战绩</p>
+    <h1>{{ bot.name }}</h1>
+    <p class="muted">当前评分：<b>{{ rating }}</b></p>
+    <p><a href="/arena">← 返回大厅</a></p>
+  </div>
+</section>
+
+<section class="grid-layout">
+  <div>
+    <div class="panel stats-cards">
+      <div class="stat-card"><b>{{ games }}</b><span>总对局</span></div>
+      <div class="stat-card win"><b>{{ wins }}</b><span>胜</span></div>
+      <div class="stat-card loss"><b>{{ losses }}</b><span>负</span></div>
+      <div class="stat-card draw"><b>{{ draws }}</b><span>和</span></div>
+      <div class="stat-card"><b>{{ "%.1f"|format(win_rate * 100) }}%</b><span>胜率</span></div>
+    </div>
+
+    <h2>最近对局</h2>
+    <div class="panel">
+      <table class="stats-table">
+        <thead>
+          <tr><th>对局 ID</th><th>对手</th><th>结果</th><th>手数</th><th>日期</th></tr>
+        </thead>
+        <tbody>
+          {% for m in recent_matches %}
+          <tr class="result-{{ m.result }}">
+            <td><a href="/matches/{{ m.id }}">{{ m.id[:24] }}…</a></td>
+            <td>{{ m.opponent }}</td>
+            <td>
+              {% if m.result == "win" %}🏆 胜
+              {% elif m.result == "loss" %}❌ 负
+              {% elif m.result == "draw" %}🤝 和
+              {% else %}⏳ 进行中
+              {% endif %}
+            </td>
+            <td>{{ m.ply }}</td>
+            <td>{{ m.created_at }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="5" class="muted">暂无对局记录</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if rating_history %}
+    <h2>评分历史</h2>
+    <div class="panel">
+      <table class="stats-table">
+        <thead>
+          <tr><th>评分</th><th>对局 ID</th><th>日期</th></tr>
+        </thead>
+        <tbody>
+          {% for rh in rating_history %}
+          <tr>
+            <td><b>{{ rh.rating }}</b></td>
+            <td><a href="/matches/{{ rh.match_id }}">{{ rh.match_id[:24] }}…</a></td>
+            <td>{{ rh.created_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

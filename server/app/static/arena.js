@@ -30,6 +30,7 @@ function renderBots(){
     el.querySelector('.record').textContent=`Rating ${r.rating} · ${r.games}局 ${r.wins}胜/${r.losses}负/${r.draws}和`;
     el.querySelector('.pick').onclick=()=>{state.selected=b.bot_id;$('#pickedHint').textContent=`已选择：${b.name}`;renderBots()};
     const btn=el.querySelector('.challenge'); btn.disabled=!!isMe; btn.textContent=isMe?'自己':'挑战'; btn.onclick=()=>challenge(b);
+            el.querySelector('.stats-link').href=`/stats/${b.bot_id}`;
     grid.appendChild(el);
   })
 }
@@ -46,4 +47,68 @@ function renderRankings(){const ol=$('#rankingList');ol.innerHTML='';state.ranki
 function renderMatches(ms){const box=$('#matchList');box.innerHTML='';if(!ms.length){box.innerHTML='<p class="muted">暂无对局</p>';return}ms.forEach(m=>{const a=document.createElement('a');a.href=`/matches/${m.match_id}`;a.innerHTML=`<b>${m.red_bot_name}</b> vs <b>${m.black_bot_name}</b><br><span class="muted">${m.status} · ${m.ply} 手</span>`;box.appendChild(a)})}
 $('#search').addEventListener('input',renderBots);$('#onlineOnly').addEventListener('change',renderBots);$('#refreshBtn').onclick=load;
 $('#randomBtn').onclick=()=>{const pool=state.bots.filter(b=>(!state.me||b.bot_id!==state.me.bot_id)&&(!$('#onlineOnly').checked||b.online_status==='online'));if(!pool.length)return;const b=pool[Math.floor(Math.random()*pool.length)];state.selected=b.bot_id;$('#pickedHint').textContent=`随机选中：${b.name}`;renderBots()};
+
+// ── Auto Match Queue ──
+let queuePollTimer=null;
+$('#autoMatchBtn').onclick=async()=>{
+  const t=(cfg().token||'').trim(); if(!t){alert('先去个人设置填入你的 Bot token。'); location.href='/settings'; return;}
+  if(!state.me){alert('请先验证 token 后再试。'); return;}
+  try{
+    const r=await fetch('/api/queue/join',{method:'POST',headers:{'X-Bot-Token':t,'Content-Type':'application/json'}});
+    if(!r.ok){const text=await r.text(); alert('加入队列失败：'+text); return;}
+    const data=await r.json();
+    if(data.matched){
+      $('#queueStatus').classList.add('hidden');
+      clearInterval(queuePollTimer);
+      alert(`匹配成功！对手：${data.opponent_name} (Rating ${data.opponent_rating})，即将跳转对局。`);
+      location.href='/matches/'+data.match_id;
+    }else{
+      $('#queueStatus').classList.remove('hidden');
+      $('#queueText').textContent='正在匹配中…';
+      $('#queueCount').textContent=`队列中 ${data.queue_count} 人`;
+      $('#autoMatchBtn').disabled=true;
+      $('#autoMatchBtn').textContent='匹配中…';
+      queuePollTimer=setInterval(pollQueue,3000);
+    }
+  }catch(e){alert('加入队列失败：'+e.message)}
+};
+async function pollQueue(){
+  try{
+    const r=await fetch('/api/queue/status');
+    const data=await r.json();
+    $('#queueCount').textContent=`队列中 ${data.count} 人`;
+    // Check if we were matched (removed from queue, a match exists)
+    if(data.count===0||!data.queue.some(e=>e.bot_id===state.me?.bot_id)){
+      // We may have been matched - check recent matches
+      const mr=await fetch('/api/admin/matches?limit=5');
+      const md=await mr.json();
+      const recent=md.matches||[];
+      const ourMatch=recent.find(m=>m.red_bot_id===state.me.bot_id||m.black_bot_id===state.me.bot_id);
+      if(ourMatch&&ourMatch.status==='active'){
+        clearInterval(queuePollTimer);
+        $('#queueStatus').classList.add('hidden');
+        location.href='/matches/'+ourMatch.match_id;
+        return;
+      }
+    }
+    if(!data.queue.some(e=>e.bot_id===state.me?.bot_id)){
+      // Not in queue anymore
+      clearInterval(queuePollTimer);
+      $('#queueStatus').classList.add('hidden');
+      $('#autoMatchBtn').disabled=false;
+      $('#autoMatchBtn').textContent='自动匹配';
+    }
+  }catch(e){}
+}
+$('#queueLeaveBtn').onclick=async()=>{
+  const t=(cfg().token||'').trim(); if(!t)return;
+  try{
+    await fetch('/api/queue/leave',{method:'POST',headers:{'X-Bot-Token':t}});
+  }catch(e){}
+  clearInterval(queuePollTimer);
+  $('#queueStatus').classList.add('hidden');
+  $('#autoMatchBtn').disabled=false;
+  $('#autoMatchBtn').textContent='自动匹配';
+  await load();
+};
 load().catch(e=>{$('#botGrid').innerHTML=`<p class="muted">加载失败：${e.message}</p>`});

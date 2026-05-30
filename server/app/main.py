@@ -89,6 +89,8 @@ tokens: dict[str, str] = {}
 challenges: dict[str, Challenge] = {}
 matches: dict[str, Match] = {}
 subscribers: dict[str, set[asyncio.Queue]] = {}
+match_sse_queues: dict[str, set[asyncio.Queue]] = {}
+match_queue_entries: dict[str, dict[str, Any]] = {}  # bot_id -> {bot_id, rating, joined_at}
 state_lock = asyncio.Lock()
 
 
@@ -188,6 +190,22 @@ def init_db() -> None:
                 updated_at REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS rating_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bot_id TEXT NOT NULL,
+                rating INTEGER NOT NULL,
+                match_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_rating_history_bot ON rating_history(bot_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS match_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bot_id TEXT UNIQUE NOT NULL,
+                rating INTEGER DEFAULT 1000,
+                joined_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS moves (
                 id TEXT PRIMARY KEY,
                 match_id TEXT NOT NULL,
@@ -248,6 +266,7 @@ def load_state_from_db() -> None:
     tokens.clear()
     challenges.clear()
     matches.clear()
+    match_queue_entries.clear()
     with db_connect() as conn:
         for row in conn.execute("SELECT * FROM bots"):
             bot = Bot(
@@ -291,6 +310,13 @@ def load_state_from_db() -> None:
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )
+
+        for row in conn.execute("SELECT * FROM match_queue"):
+            match_queue_entries[row["bot_id"]] = {
+                "bot_id": row["bot_id"],
+                "rating": row["rating"] or 1000,
+                "joined_at": row["joined_at"],
+            }
 
 
 def save_bot(bot: Bot) -> None:
@@ -440,6 +466,10 @@ def update_rankings_for_finished_match(m: Match) -> None:
                      losses=excluded.losses, draws=excluded.draws, win_rate=excluded.win_rate, streak=excluded.streak, updated_at=excluded.updated_at""",
                 (bot_id, rating, games, wins, losses, draws, win_rate, streak, now),
             )
+            conn.execute(
+                "INSERT INTO rating_history(bot_id, rating, match_id, created_at) VALUES(?, ?, ?, ?)",
+                (bot_id, rating, m.id, fmt_ts(now)),
+            )
 
 
 def challenge_public(ch: Challenge) -> dict[str, Any]:
@@ -499,6 +529,15 @@ def bearer_token(authorization: str | None = Header(default=None)) -> str:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     return authorization.split(" ", 1)[1].strip()
+
+
+async def x_bot_token(x_bot_token: str | None = Header(default=None, alias="X-Bot-Token")) -> str:
+    if not x_bot_token:
+        raise HTTPException(status_code=401, detail="missing X-Bot-Token header")
+    bot_id = tokens.get(x_bot_token)
+    if not bot_id or bot_id not in bots:
+        raise HTTPException(status_code=401, detail="invalid token")
+    return bot_id
 
 
 async def get_current_bot(token: str = Depends(bearer_token)) -> Bot:
@@ -617,6 +656,107 @@ async def get_rankings(limit: int = Query(50, ge=1, le=200), offset: int = Query
     return {"total": total, "limit": limit, "offset": offset, "rankings": rankings}
 
 
+@app.get("/api/stats/{bot_id}")
+async def api_bot_stats(bot_id: str) -> dict[str, Any]:
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail="bot not found")
+    bot = bots[bot_id]
+    rank = ranking_for(bot_id)
+    with db_connect() as conn:
+        history_rows = conn.execute(
+            "SELECT rating, match_id, created_at FROM rating_history WHERE bot_id = ? ORDER BY created_at DESC LIMIT 50",
+            (bot_id,),
+        ).fetchall()
+        rating_history = [{"rating": r["rating"], "match_id": r["match_id"], "created_at": r["created_at"]} for r in history_rows]
+
+        if bot_id in matches:
+            recent = sorted(matches.values(), key=lambda m: m.updated_at, reverse=True)
+        else:
+            recent = []
+        recent_matches = []
+        for m in recent:
+            if (m.red_bot_id == bot_id or m.black_bot_id == bot_id) and len(recent_matches) < 20:
+                opp_id = m.black_bot_id if m.red_bot_id == bot_id else m.red_bot_id
+                if m.result:
+                    if m.winner_bot_id == bot_id:
+                        result_str = "win"
+                    elif m.result == "draw":
+                        result_str = "draw"
+                    else:
+                        result_str = "loss"
+                else:
+                    result_str = "pending"
+                recent_matches.append({
+                    "id": m.id,
+                    "opponent": bot_name(opp_id),
+                    "result": result_str,
+                    "ply": m.ply,
+                    "created_at": fmt_ts(m.created_at),
+                })
+    return {
+        "name": bot.name,
+        "rating": rank["rating"],
+        "games": rank["games"],
+        "wins": rank["wins"],
+        "losses": rank["losses"],
+        "draws": rank["draws"],
+        "win_rate": rank["win_rate"],
+        "rating_history": rating_history,
+        "recent_matches": recent_matches,
+    }
+
+
+@app.get("/stats/{bot_id}", response_class=HTMLResponse)
+async def bot_stats_page(request: Request, bot_id: str) -> HTMLResponse:
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail="bot not found")
+    bot = bots[bot_id]
+    rank = ranking_for(bot_id)
+    with db_connect() as conn:
+        history_rows = conn.execute(
+            "SELECT rating, match_id, created_at FROM rating_history WHERE bot_id = ? ORDER BY created_at DESC LIMIT 50",
+            (bot_id,),
+        ).fetchall()
+        rating_history = [{"rating": r["rating"], "match_id": r["match_id"], "created_at": r["created_at"]} for r in history_rows]
+
+        recent_matches_sorted = sorted(
+            [m for m in matches.values() if m.red_bot_id == bot_id or m.black_bot_id == bot_id],
+            key=lambda m: m.updated_at, reverse=True,
+        )[:20]
+        recent_matches = []
+        for m in recent_matches_sorted:
+            opp_id = m.black_bot_id if m.red_bot_id == bot_id else m.red_bot_id
+            if m.result:
+                if m.winner_bot_id == bot_id:
+                    result_str = "win"
+                elif m.result == "draw":
+                    result_str = "draw"
+                else:
+                    result_str = "loss"
+            else:
+                result_str = "pending"
+            recent_matches.append({
+                "id": m.id,
+                "opponent": bot_name(opp_id),
+                "result": result_str,
+                "ply": m.ply,
+                "created_at": fmt_ts(m.created_at),
+            })
+    return templates.TemplateResponse(request, "stats.html", {
+        "title": f"{bot.name} 战绩",
+        "bot": bot_public(bot),
+        "rating": rank["rating"],
+        "games": rank["games"],
+        "wins": rank["wins"],
+        "losses": rank["losses"],
+        "draws": rank["draws"],
+        "win_rate": rank["win_rate"],
+        "rating_history": rating_history,
+        "recent_matches": recent_matches,
+        "bot_name": bot_name,
+    })
+
+
 @app.get("/sse/bot")
 async def sse_bot(request: Request, token: str = Query(...)) -> StreamingResponse:
     bot_id = tokens.get(token)
@@ -654,6 +794,163 @@ async def sse_bot(request: Request, token: str = Query(...)) -> StreamingRespons
 
 def format_sse(msg: dict[str, Any]) -> str:
     return f"event: {msg['event']}\ndata: {json.dumps(msg['data'], ensure_ascii=False)}\n\n"
+
+
+@app.get("/sse/match/{match_id}")
+async def sse_match(request: Request, match_id: str) -> StreamingResponse:
+    if match_id not in matches:
+        raise HTTPException(status_code=404, detail="match not found")
+    q: asyncio.Queue = asyncio.Queue(maxsize=128)
+    match_sse_queues.setdefault(match_id, set()).add(q)
+
+    async def gen():
+        try:
+            # Send current state immediately on connect
+            m = matches.get(match_id)
+            if m:
+                initial = {"event": "match_state", "data": match_sse_payload(m), "ts": time.time()}
+                yield format_sse(initial)
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=15)
+                    yield format_sse(msg)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            match_sse_queues.get(match_id, set()).discard(q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def match_sse_payload(m: Match) -> dict[str, Any]:
+    data = match_public(m, include_legal_moves=False)
+    last_move = m.moves[-1] if m.moves else None
+    return {"fen": m.fen, "ply": m.ply, "moves": m.moves, "status": m.status, "result": m.result, "last_move": last_move}
+
+
+async def broadcast_match_sse(match_id: str) -> None:
+    m = matches.get(match_id)
+    if not m:
+        return
+    payload = {"event": "match_state", "data": match_sse_payload(m), "ts": time.time()}
+    for q in list(match_sse_queues.get(match_id, set())):
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            try:
+                q.get_nowait()
+                q.put_nowait(payload)
+            except Exception:
+                pass
+
+
+# ── Queue endpoints ──────────────────────────────────────────────
+
+@app.post("/api/queue/join")
+async def queue_join(request: Request, bot_id: str = Depends(x_bot_token)) -> dict[str, Any]:
+    async with state_lock:
+        # Reject if already in queue
+        if bot_id in match_queue_entries:
+            raise HTTPException(status_code=400, detail="already in queue")
+
+        # Determine rating
+        rank = ranking_for(bot_id)
+        rating = rank.get("rating", 1000)
+        now_iso = fmt_ts(time.time())
+
+        # Insert into DB and in-memory dict
+        with db_connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO match_queue(bot_id, rating, joined_at) VALUES(?, ?, ?)",
+                (bot_id, rating, now_iso),
+            )
+        match_queue_entries[bot_id] = {"bot_id": bot_id, "rating": rating, "joined_at": now_iso}
+
+        matched_bot_id: str | None = None
+        matched_rating: int | None = None
+        for other_id, entry in list(match_queue_entries.items()):
+            if other_id == bot_id:
+                continue
+            other_rating = entry.get("rating", 1000)
+            if abs(rating - other_rating) <= 200:
+                matched_bot_id = other_id
+                matched_rating = other_rating
+                break
+
+        if matched_bot_id:
+            # Remove both from queue
+            match_queue_entries.pop(bot_id, None)
+            match_queue_entries.pop(matched_bot_id, None)
+            with db_connect() as conn:
+                conn.execute("DELETE FROM match_queue WHERE bot_id IN (?, ?)", (bot_id, matched_bot_id))
+
+            # Create challenge: current bot challenges the matched bot
+            ch = Challenge(
+                id=new_id("ch"),
+                challenger_bot_id=bot_id,
+                opponent_bot_id=matched_bot_id,
+                challenger_side=choose_challenger_side(None),
+            )
+            challenges[ch.id] = ch
+            save_challenge(ch)
+
+            # Auto-accept: create match immediately
+            red_id = ch.challenger_bot_id if ch.challenger_side == RED else ch.opponent_bot_id
+            black_id = ch.opponent_bot_id if ch.challenger_side == RED else ch.challenger_bot_id
+            m = Match(id=new_id("match"), red_bot_id=red_id, black_bot_id=black_id, challenge_id=ch.id)
+            matches[m.id] = m
+            ch.status = "accepted"
+            ch.match_id = m.id
+            save_challenge(ch)
+            save_match(m)
+
+            ch_data = challenge_public(ch)
+            m_data = match_public(m)
+            # Emit to both bots
+            await emit(ch.challenger_bot_id, "challenge_accepted", {**ch_data, "match": m_data})
+            await emit(ch.opponent_bot_id, "challenge_accepted", {**ch_data, "match": m_data})
+            await emit_match_started(m)
+
+            return {
+                "matched": True,
+                "match_id": m.id,
+                "opponent_bot_id": matched_bot_id,
+                "opponent_name": bot_name(matched_bot_id),
+                "opponent_rating": matched_rating,
+                "match": m_data,
+            }
+        else:
+            return {
+                "matched": False,
+                "queue_count": len(match_queue_entries),
+                "message": "waiting for opponent",
+            }
+
+
+@app.post("/api/queue/leave")
+async def queue_leave(bot_id: str = Depends(x_bot_token)) -> dict[str, Any]:
+    async with state_lock:
+        if bot_id not in match_queue_entries:
+            raise HTTPException(status_code=400, detail="not in queue")
+        match_queue_entries.pop(bot_id, None)
+        with db_connect() as conn:
+            conn.execute("DELETE FROM match_queue WHERE bot_id = ?", (bot_id,))
+    return {"success": True, "queue_count": len(match_queue_entries)}
+
+
+@app.get("/api/queue/status")
+async def queue_status() -> dict[str, Any]:
+    queue_list = []
+    for bot_id, entry in match_queue_entries.items():
+        queue_list.append({
+            "bot_id": bot_id,
+            "name": bot_name(bot_id),
+            "rating": entry.get("rating", 1000),
+            "joined_at": entry.get("joined_at", ""),
+        })
+    return {"queue": queue_list, "count": len(queue_list)}
 
 
 @app.post("/api/challenges")
@@ -836,4 +1133,5 @@ async def make_move(match_id: str, req: MoveReq, bot: Bot = Depends(get_current_
             await emit(pid, "match_finished", match_public(m))
     else:
         await emit_turn(m)
+    await broadcast_match_sse(match_id)
     return data

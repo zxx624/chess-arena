@@ -12,10 +12,25 @@
     <nav>
       <a href="/arena">大厅</a>
       <a href="/settings">个人设置</a>
+      <button class="theme-toggle" id="themeToggle" aria-label="切换暗色模式">🌓</button>
     </nav>
   </header>
   <main class="page">
     {% block content %}{% endblock %}
   </main>
+  <script>
+  (function(){
+    const KEY='chessArenaTheme';
+    const saved=localStorage.getItem(KEY);
+    if(saved==='dark') document.documentElement.setAttribute('data-theme','dark');
+    function toggle(){
+      const cur=document.documentElement.getAttribute('data-theme');
+      const next=cur==='dark'?'light':'dark';
+      document.documentElement.setAttribute('data-theme',next||'');
+      localStorage.setItem(KEY,next);
+    }
+    document.getElementById('themeToggle').addEventListener('click',toggle);
+  })();
+  </script>
 </body>
 </html>

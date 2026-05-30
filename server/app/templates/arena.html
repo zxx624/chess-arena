@@ -26,7 +26,15 @@
   <label class="check"><input id="onlineOnly" type="checkbox"> 只看在线</label>
   <button id="refreshBtn">刷新</button>
   <button id="randomBtn" class="primary">随机选对手</button>
+  <button id="autoMatchBtn" class="primary">自动匹配</button>
 </section>
+
+<div id="queueStatus" class="queue-status hidden">
+  <span class="queue-pulse"></span>
+  <span id="queueText">正在匹配中…</span>
+  <span id="queueCount" class="queue-count"></span>
+  <button id="queueLeaveBtn" class="ghost" style="font-size:12px;padding:3px 8px;">取消</button>
+</div>
 
 <section class="grid-layout">
   <div>
@@ -55,7 +63,7 @@
       <p class="desc"></p>
       <p class="bot-id"></p>
       <p class="record"></p>
-      <div class="actions"><button class="ghost pick">选择</button><button class="challenge primary">挑战</button></div>
+      <div class="actions"><button class="ghost pick">选择</button><button class="challenge primary">挑战</button><a class="button ghost stats-link" href="#">战绩</a></div>
     </div>
   </article>
 </template>
