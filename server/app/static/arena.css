@@ -662,11 +662,13 @@ button:disabled {
 
 .palace-line {
   position: absolute;
-  width: 141%;
-  height: 1px;
-  background: rgba(139, 105, 20, .25);
+  width: 280%;
+  height: 2px;
+  background: rgba(139, 105, 20, .35);
   top: 50%;
   left: 50%;
+  pointer-events: none;
+  z-index: 1;
 }
 
 .palace-line.d1 {

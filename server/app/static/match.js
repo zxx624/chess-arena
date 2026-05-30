@@ -40,10 +40,8 @@ function renderBoard(fen){
     if((r===4||r===5)&&c>0&&c<8) cell.classList.add('river-gap');
     if(r===4&&c===1){ cell.classList.add('river-left'); cell.innerHTML='<span class="river-text">楚河</span>'; }
     if(r===4&&c===6){ cell.classList.add('river-right'); cell.innerHTML='<span class="river-text">汉界</span>'; }
-    // Palace diagonals: palace is cols 3-5, rows 0-2 (black) and 7-9 (red)
-    // Diagonal lines connect corners: (0,3)-(2,5), (0,5)-(2,3), (7,3)-(9,5), (7,5)-(9,3)
-    // Draw on cells that these diagonals pass through
-    if(((r>=0&&r<=2||r>=7&&r<=9)&&c>=3&&c<=5)){
+    // Palace diagonals: draw only on center cell of each palace, lines span full 3x3
+    if((r===1&&c===4)||(r===8&&c===4)){
       const d1=document.createElement('span'); d1.className='palace-line d1'; const d2=document.createElement('span'); d2.className='palace-line d2'; cell.append(d1,d2);
     }
     // Cannon/pawn marker dots
