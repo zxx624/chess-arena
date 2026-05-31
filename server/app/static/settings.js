@@ -10,7 +10,6 @@ function saveSettings(data){localStorage.setItem(STORAGE_KEY,JSON.stringify({...
 function fill(){const s=loadSettings(); $('#arenaBase').value=s.arenaBase||currentOrigin(); $('#botToken').value=s.token||''; $('#adminToken').value=s.adminToken||''; $('#botName').value=s.name||''; $('#avatarUrl').value=s.avatar_url||''; $('#description').value=s.description||''; $('#chessStyle').value=s.chess_style||'random'; $('#personaPrompt').value=s.persona_prompt||'';}
 function candidateBases(){
   const candidates=[base(), currentOrigin(), 'https://fazuo624.icu'];
-  if(location.protocol!=='https:') candidates.push('http://101.43.22.174:8787');
   const out=[];
   for(const item of candidates){const b=cleanBase(item); if(b&&!out.includes(b)) out.push(b)}
   return out;
