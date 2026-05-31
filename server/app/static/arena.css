@@ -627,20 +627,26 @@ button:disabled {
 
 /* ===== Xiangqi Board ===== */
 .xiangqi-board {
+  --board-line: #8b6914;
+  --board-line-soft: rgba(139, 105, 20, .62);
+  --piece-size: clamp(34px, 8.4vw, 50px);
   display: grid;
   grid-template-columns: repeat(9, 1fr);
   max-width: 540px;
   margin: 0 auto 34px;
+  padding: clamp(18px, 3.8vw, 30px);
   background: #f5e6c8;
-  border-radius: 6px;
+  border-radius: 8px;
   overflow: visible;
-  border: 3px solid #8b6914;
+  border: 3px solid var(--board-line);
   gap: 0;
-  box-shadow: 0 8px 24px rgba(86, 55, 20, .15);
+  box-shadow: 0 8px 24px rgba(86, 55, 20, .15), inset 0 0 0 1px rgba(255,255,255,.28);
   position: relative;
 }
 
 [data-theme="dark"] .xiangqi-board {
+  --board-line: #8a6a37;
+  --board-line-soft: rgba(214, 171, 91, .5);
   background: #2a2318;
   border-color: #5a4a2a;
 }
@@ -651,43 +657,53 @@ button:disabled {
   align-items: center;
   justify-content: center;
   position: relative;
-  border: 1px solid rgba(139, 105, 20, .2);
+  border: 0;
   font-size: 10px;
   transition: background var(--transition);
 }
+
+/* 象棋是走线交点，不是走格子：线画在交点之间，棋子压在线的交叉点上 */
+.xq-cell::before,
+.xq-cell::after {
+  content: "";
+  position: absolute;
+  background: var(--board-line-soft);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.xq-cell::before {
+  height: 1.5px;
+  left: -50%;
+  right: -50%;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.xq-cell::after {
+  width: 1.5px;
+  top: -50%;
+  bottom: -50%;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.xq-cell.edge-l::before { left: 50%; }
+.xq-cell.edge-r::before { right: 50%; }
+.xq-cell.edge-t::after { top: 50%; }
+.xq-cell.edge-b::after { bottom: 50%; }
+
+.xq-cell.edge-l.edge-r::before,
+.xq-cell.edge-t.edge-b::after { display: none; }
 
 .xq-cell:hover {
   background: rgba(183, 137, 67, .08);
 }
 
-.edge-l {
-  border-left: 2px solid #8b6914;
-}
-
-.edge-r {
-  border-right: 2px solid #8b6914;
-}
-
-.edge-t {
-  border-top: 2px solid #8b6914;
-}
-
-.edge-b {
-  border-bottom: 2px solid #8b6914;
-}
-
-/* 楚河汉界：用独立横带插在第 4/5 行之间，形成标准象棋棋盘的空河道 */
-.xq-cell.river-top {
-  border-bottom: 2px solid #8b6914;
-}
-
-.xq-cell.river-bottom {
-  border-top: 2px solid #8b6914;
-}
-
-.river-gap {
-  background: transparent;
-}
+/* 楚河汉界：独立空河道。上下两边是交点棋盘，竖线在河道断开。 */
+.xq-cell.river-top::after { bottom: 50%; }
+.xq-cell.river-bottom::after { top: 50%; }
+.river-gap { background: transparent; }
 
 .river-band {
   grid-column: 1 / -1;
@@ -695,12 +711,21 @@ button:disabled {
   position: relative;
   background:
     linear-gradient(90deg, rgba(139,105,20,.06), rgba(255,246,219,.55) 18%, rgba(255,246,219,.55) 82%, rgba(139,105,20,.06));
-  border-left: 2px solid #8b6914;
-  border-right: 2px solid #8b6914;
-  border-top: 0;
-  border-bottom: 0;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.35), inset 0 -1px 0 rgba(139,105,20,.12);
+  box-shadow: inset 0 1px 0 rgba(139,105,20,.28), inset 0 -1px 0 rgba(139,105,20,.28);
 }
+
+.river-band::before,
+.river-band::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1.5px;
+  background: var(--board-line-soft);
+}
+
+.river-band::before { left: 0; }
+.river-band::after { right: 0; }
 
 .river-text {
   position: absolute;
@@ -717,17 +742,10 @@ button:disabled {
   white-space: nowrap;
 }
 
-.river-text-left {
-  left: 16%;
-}
+.river-text-left { left: 16%; }
+.river-text-right { right: 12%; }
 
-.river-text-right {
-  right: 12%;
-}
-
-.hidden {
-  display: none !important;
-}
+.hidden { display: none !important; }
 
 [data-theme="dark"] .river-band {
   background: linear-gradient(90deg, rgba(90,74,42,.22), rgba(42,35,24,.92) 18%, rgba(42,35,24,.92) 82%, rgba(90,74,42,.22));
@@ -740,108 +758,108 @@ button:disabled {
 .palace-line {
   position: absolute;
   width: 280%;
-  height: 2px;
-  background: rgba(139, 105, 20, .35);
+  height: 1.5px;
+  background: var(--board-line-soft);
   top: 50%;
   left: 50%;
   pointer-events: none;
-  z-index: 1;
+  z-index: 0;
 }
 
-.palace-line.d1 {
-  transform: translate(-50%, -50%) rotate(45deg);
-}
-
-.palace-line.d2 {
-  transform: translate(-50%, -50%) rotate(-45deg);
-}
+.palace-line.d1 { transform: translate(-50%, -50%) rotate(45deg); }
+.palace-line.d2 { transform: translate(-50%, -50%) rotate(-45deg); }
 
 /* ===== Board Position Markers (cannon/pawn dots) ===== */
 .board-marker {
   position: absolute;
   pointer-events: none;
+  z-index: 1;
 }
 
 .board-marker.marker-corner {
-  /* L-shaped corner marks at pawn positions */
-  width: 8px;
-  height: 8px;
-  top: -2px;
-  left: -2px;
-  border-top: 1.5px solid rgba(139, 105, 20, .35);
-  border-left: 1.5px solid rgba(139, 105, 20, .35);
-}
-
-.board-marker.marker-diamond {
-  /* Small cross/diamond at cannon positions */
-  width: 6px;
-  height: 6px;
+  width: 18px;
+  height: 18px;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: rgba(139, 105, 20, .25);
-  border-radius: 1px;
-  box-shadow:
-    3px 0 0 rgba(139, 105, 20, .25),
-    -3px 0 0 rgba(139, 105, 20, .25),
-    0 3px 0 rgba(139, 105, 20, .25),
-    0 -3px 0 rgba(139, 105, 20, .25);
+}
+
+.board-marker.marker-corner::before,
+.board-marker.marker-corner::after,
+.board-marker.marker-diamond::before,
+.board-marker.marker-diamond::after {
+  content: "";
+  position: absolute;
+  border-color: rgba(139, 105, 20, .48);
+}
+
+.board-marker.marker-corner::before {
+  left: -12px;
+  top: -12px;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid;
+  border-bottom: 1.5px solid;
+}
+
+.board-marker.marker-corner::after {
+  right: -12px;
+  top: -12px;
+  width: 7px;
+  height: 7px;
+  border-left: 1.5px solid;
+  border-bottom: 1.5px solid;
+}
+
+.board-marker.marker-diamond {
+  width: 20px;
+  height: 20px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.board-marker.marker-diamond::before {
+  left: -12px;
+  top: -12px;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid;
+  border-bottom: 1.5px solid;
+}
+
+.board-marker.marker-diamond::after {
+  right: -12px;
+  bottom: -12px;
+  width: 7px;
+  height: 7px;
+  border-left: 1.5px solid;
+  border-top: 1.5px solid;
 }
 
 /* ===== Coordinate Labels ===== */
-.xq-cell[data-coord^="file-"]::after {
-  content: attr(data-coord);
+.xq-cell[data-coord^="file-"] .coord-file,
+.xq-cell[data-coord^="rank-"] .coord-rank {
   position: absolute;
-  bottom: -18px;
+  color: rgba(139, 105, 20, .42);
+  pointer-events: none;
+  font-weight: 700;
+  z-index: 3;
+}
+
+.xq-cell[data-coord^="file-"] .coord-file {
+  bottom: calc(-1 * clamp(18px, 3.8vw, 30px) + 2px);
   left: 50%;
   transform: translateX(-50%);
   font-size: 10px;
-  color: rgba(139, 105, 20, .35);
-  pointer-events: none;
-  font-weight: 700;
-  text-transform: capitalize;
 }
 
-.xq-cell[data-coord^="file-"]::after {
-  content: "";
-}
-
-.xq-cell[data-coord="file-a"]::after { content: "a"; }
-.xq-cell[data-coord="file-b"]::after { content: "b"; }
-.xq-cell[data-coord="file-c"]::after { content: "c"; }
-.xq-cell[data-coord="file-d"]::after { content: "d"; }
-.xq-cell[data-coord="file-e"]::after { content: "e"; }
-.xq-cell[data-coord="file-f"]::after { content: "f"; }
-.xq-cell[data-coord="file-g"]::after { content: "g"; }
-.xq-cell[data-coord="file-h"]::after { content: "h"; }
-.xq-cell[data-coord="file-i"]::after { content: "i"; }
-
-.xq-cell[data-coord^="rank-"]::after {
-  content: attr(data-coord);
-  position: absolute;
-  right: -18px;
+.xq-cell[data-coord^="rank-"] .coord-rank {
+  right: calc(-1 * clamp(18px, 3.8vw, 30px) + 3px);
   top: 50%;
   transform: translateY(-50%);
   font-size: 10px;
-  color: rgba(139, 105, 20, .35);
-  pointer-events: none;
-  font-weight: 700;
 }
-
-.xq-cell[data-coord^="rank-"]::after {
-  content: "";
-}
-
-.xq-cell[data-coord="rank-0"]::after { content: "0"; }
-.xq-cell[data-coord="rank-1"]::after { content: "1"; }
-.xq-cell[data-coord="rank-2"]::after { content: "2"; }
-.xq-cell[data-coord="rank-3"]::after { content: "3"; }
-.xq-cell[data-coord="rank-4"]::after { content: "4"; }
-.xq-cell[data-coord="rank-5"]::after { content: "5"; }
-.xq-cell[data-coord="rank-6"]::after { content: "6"; }
-.xq-cell[data-coord="rank-7"]::after { content: "7"; }
-.xq-cell[data-coord="rank-8"]::after { content: "8"; }
-.xq-cell[data-coord="rank-9"]::after { content: "9"; }
 
 /* ===== Captured Pieces ===== */
 .captured-pieces {

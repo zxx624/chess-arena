@@ -79,8 +79,8 @@ function renderBoard(fen){
       cell.appendChild(lShape);
     }
     // File labels on bottom row (row 9 = red home), rank labels on rightmost column
-    if(r===9){ cell.setAttribute('data-coord','file-'+'abcdefghi'[c]); }
-    if(c===8){ cell.setAttribute('data-coord','rank-'+r); }
+    if(r===9){ cell.setAttribute('data-coord','file-'+'abcdefghi'[c]); const fl=document.createElement('span'); fl.className='coord-file'; fl.textContent='abcdefghi'[c]; cell.appendChild(fl); }
+    if(c===8){ cell.setAttribute('data-coord','rank-'+r); const rl=document.createElement('span'); rl.className='coord-rank'; rl.textContent=String(r); cell.appendChild(rl); }
     board.appendChild(cell);
     if(r===4&&c===8){
       const river=document.createElement('div');
