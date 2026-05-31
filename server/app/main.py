@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import sqlite3
+import hmac
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -26,6 +27,7 @@ DB_PATH = Path(os.environ.get("CHESS_ARENA_DB", "/mnt/cosmem/gulu1-1415708756/ch
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
+ADMIN_TOKEN = os.environ.get("CHESS_ARENA_ADMIN_TOKEN", "").strip()
 
 app = FastAPI(title="chess-arena-server", version="0.2.0")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -565,6 +567,39 @@ def bearer_token(authorization: str | None = Header(default=None)) -> str:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     return authorization.split(" ", 1)[1].strip()
+
+
+def optional_bearer_token(authorization: str | None = Header(default=None)) -> str | None:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    return authorization.split(" ", 1)[1].strip()
+
+
+def is_admin_token(token: str | None) -> bool:
+    return bool(ADMIN_TOKEN and token and hmac.compare_digest(token, ADMIN_TOKEN))
+
+
+def require_admin(token: str | None = Depends(optional_bearer_token)) -> None:
+    if not is_admin_token(token):
+        raise HTTPException(status_code=403, detail="admin token required")
+
+
+def actor_bot_or_admin(token: str | None = Depends(optional_bearer_token)) -> tuple[Bot | None, bool]:
+    if is_admin_token(token):
+        return None, True
+    if not token:
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    bot_id = tokens.get(token)
+    if not bot_id or bot_id not in bots:
+        raise HTTPException(status_code=401, detail="invalid token")
+    return bots[bot_id], False
+
+
+def ensure_match_control_allowed(m: Match, bot: Bot | None, is_admin: bool) -> None:
+    if is_admin:
+        return
+    if not bot or bot.id not in (m.red_bot_id, m.black_bot_id):
+        raise HTTPException(status_code=403, detail="only participants or admin can control this match")
 
 
 async def x_bot_token(x_bot_token: str | None = Header(default=None, alias="X-Bot-Token")) -> str:
@@ -1129,48 +1164,73 @@ async def get_match(match_id: str, bot: Bot = Depends(get_current_bot)) -> dict[
 
 
 @app.post("/api/matches/{match_id}/stop")
-async def stop_match(match_id: str, bot: Bot = Depends(get_current_bot)) -> dict[str, Any]:
+async def stop_match(match_id: str, actor: tuple[Bot | None, bool] = Depends(actor_bot_or_admin)) -> dict[str, Any]:
+    bot, is_admin = actor
     async with state_lock:
         m = matches.get(match_id)
         if not m:
             raise HTTPException(status_code=404, detail="match not found")
-        if bot.id not in (m.red_bot_id, m.black_bot_id):
-            raise HTTPException(status_code=403, detail="not a participant")
+        ensure_match_control_allowed(m, bot, is_admin)
         if m.status != "active":
             return {"match": match_public(m, include_legal_moves=False), "stopped": False, "message": "match already stopped"}
         m.status = "finished"
         m.result = "stopped"
-        m.finish_reason = f"stopped_by_{bot.id}"
-        m.updated_at = time.time()
+        m.finish_reason = "stopped_by_admin" if is_admin else f"stopped_by_{bot.id}"
+        m.finished_at = time.time()
+        m.updated_at = m.finished_at
         save_match(m)
         update_rankings_for_finished_match(m)
         data = match_public(m, include_legal_moves=False)
         participants = [m.red_bot_id, m.black_bot_id]
     for pid in participants:
         await emit(pid, "match_finished", data)
-    return {"match": data, "stopped": True}
+    await broadcast_match_sse(match_id)
+    return {"match": data, "stopped": True, "admin": is_admin}
 
 
 @app.post("/api/matches/{match_id}/pause")
-async def pause_match(match_id: str, bot: Bot = Depends(get_current_bot)) -> dict[str, Any]:
-    """Toggle paused state for a match. Requires bot auth (either participant)."""
+async def pause_match(match_id: str, actor: tuple[Bot | None, bool] = Depends(actor_bot_or_admin)) -> dict[str, Any]:
+    """Toggle paused state. Participants can control their own matches; admin can control any match."""
+    bot, is_admin = actor
     async with state_lock:
         m = matches.get(match_id)
         if not m:
             raise HTTPException(status_code=404, detail="match not found")
-        if bot.id not in (m.red_bot_id, m.black_bot_id):
-            raise HTTPException(status_code=403, detail="not a participant")
+        ensure_match_control_allowed(m, bot, is_admin)
         if m.status != "active":
             raise HTTPException(status_code=400, detail="match not active")
         m.paused = not m.paused
         m.updated_at = time.time()
         save_match(m)
         data = match_public(m, include_legal_moves=False)
+        should_resume = not m.paused
     await broadcast_match_sse(match_id)
     # After unpausing, tell the bot whose turn it is to resume
-    if not m.paused:
+    if should_resume:
         await emit_turn(m)
-    return {"match": data, "paused": m.paused}
+    return {"match": data, "paused": m.paused, "admin": is_admin}
+
+
+@app.post("/api/admin/matches/stop_all")
+async def admin_stop_all(_: None = Depends(require_admin)) -> dict[str, Any]:
+    stopped: list[dict[str, Any]] = []
+    async with state_lock:
+        now = time.time()
+        targets = [m for m in matches.values() if m.status == "active"]
+        for m in targets:
+            m.status = "finished"
+            m.result = "stopped"
+            m.finish_reason = "stopped_all_by_admin"
+            m.finished_at = now
+            m.updated_at = now
+            save_match(m)
+            update_rankings_for_finished_match(m)
+            stopped.append(match_public(m, include_legal_moves=False))
+    for data in stopped:
+        for pid in (data["red_bot_id"], data["black_bot_id"]):
+            await emit(pid, "match_finished", data)
+        await broadcast_match_sse(data["match_id"])
+    return {"stopped": len(stopped), "matches": stopped}
 
 
 @app.post("/api/analyze")

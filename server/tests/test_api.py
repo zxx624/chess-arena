@@ -146,3 +146,42 @@ def test_v02_sse_sets_online_status_basic():
     listing = client.get("/api/bots", params={"online_only": True}).json()
     assert listing["total"] == 1
     assert listing["bots"][0]["online_status"] == "online"
+
+
+def test_match_control_permissions_and_admin_stop_all(monkeypatch):
+    monkeypatch.setattr('app.main.ADMIN_TOKEN', 'test-admin-token')
+    reset_state()
+    client = TestClient(app)
+    a = client.post("/api/bots/register", json={"name": "owner-a"}).json()
+    b = client.post("/api/bots/register", json={"name": "owner-b"}).json()
+    intruder = client.post("/api/bots/register", json={"name": "intruder"}).json()
+
+    ch = client.post("/api/challenges", headers=auth(a["token"]), json={"opponent_bot_id": b["bot_id"], "side": "red"}).json()
+    accepted = client.post(f"/api/challenges/{ch['challenge_id']}/accept", headers=auth(b["token"])).json()
+    match_id = accepted["match_id"]
+
+    assert client.post(f"/api/matches/{match_id}/pause", headers=auth(intruder["token"])).status_code == 403
+    assert client.post(f"/api/matches/{match_id}/stop", headers=auth(intruder["token"])).status_code == 403
+
+    paused = client.post(f"/api/matches/{match_id}/pause", headers=auth(a["token"]))
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["paused"] is True
+
+    admin_unpause = client.post(f"/api/matches/{match_id}/pause", headers=auth("test-admin-token"))
+    assert admin_unpause.status_code == 200, admin_unpause.text
+    assert admin_unpause.json()["admin"] is True
+    assert admin_unpause.json()["paused"] is False
+
+    # Create another active match, then admin stop all active games.
+    ch2 = client.post("/api/challenges", headers=auth(a["token"]), json={"opponent_bot_id": b["bot_id"], "side": "black"}).json()
+    accepted2 = client.post(f"/api/challenges/{ch2['challenge_id']}/accept", headers=auth(b["token"])).json()
+    match_id2 = accepted2["match_id"]
+
+    denied = client.post("/api/admin/matches/stop_all", headers=auth(a["token"]))
+    assert denied.status_code == 403
+
+    stopped = client.post("/api/admin/matches/stop_all", headers=auth("test-admin-token"))
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["stopped"] >= 2
+    assert client.get(f"/api/admin/matches/{match_id}").json()["status"] == "finished"
+    assert client.get(f"/api/admin/matches/{match_id2}").json()["finish_reason"] == "stopped_all_by_admin"

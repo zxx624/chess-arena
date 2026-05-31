@@ -635,6 +635,7 @@ button:disabled {
   border-radius: 6px;
   overflow: visible;
   border: 3px solid #8b6914;
+  gap: 0;
   box-shadow: 0 8px 24px rgba(86, 55, 20, .15);
   position: relative;
 }
@@ -676,7 +677,32 @@ button:disabled {
 }
 
 .river-gap {
-  background: linear-gradient(180deg, rgba(135, 196, 240, .1), rgba(135, 196, 240, .05));
+  background: linear-gradient(180deg, rgba(135, 196, 240, .16), rgba(135, 196, 240, .06));
+}
+
+/* 楚河汉界：第4、5行之间必须断开，不画贯穿红黑双方的竖线 */
+.xq-cell.river-top {
+  border-bottom: 0;
+}
+
+.xq-cell.river-bottom {
+  border-top: 0;
+}
+
+.xq-cell.river-top:not(.edge-l):not(.edge-r),
+.xq-cell.river-bottom:not(.edge-l):not(.edge-r) {
+  border-left-color: transparent;
+  border-right-color: transparent;
+}
+
+.xq-cell.river-top.edge-l,
+.xq-cell.river-bottom.edge-l {
+  border-right-color: transparent;
+}
+
+.xq-cell.river-top.edge-r,
+.xq-cell.river-bottom.edge-r {
+  border-left-color: transparent;
 }
 
 .river-left,
@@ -685,16 +711,36 @@ button:disabled {
 }
 
 .river-text {
-  font-size: 16px;
+  position: absolute;
+  z-index: 2;
+  font-family: "KaiTi", "STKaiti", "SimSun", serif;
+  font-size: clamp(18px, 4vw, 34px);
   font-weight: 900;
-  color: rgba(139, 105, 20, .3);
-  letter-spacing: .3em;
+  color: rgba(103, 55, 21, .72);
+  letter-spacing: .28em;
   pointer-events: none;
   user-select: none;
+  white-space: nowrap;
+}
+
+.river-left .river-text {
+  left: 50%;
+  top: 100%;
+  transform: translate(-10%, -50%);
+}
+
+.river-right .river-text {
+  left: 50%;
+  top: 100%;
+  transform: translate(-10%, -50%);
+}
+
+.hidden {
+  display: none !important;
 }
 
 [data-theme="dark"] .river-text {
-  color: rgba(183, 137, 67, .2);
+  color: rgba(236, 197, 117, .65);
 }
 
 .palace-line {

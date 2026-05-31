@@ -3,7 +3,8 @@ const STORAGE_KEY='chessArenaClientSettings';
 const $=s=>document.querySelector(s);
 const names={r:'車',n:'馬',h:'馬',b:'象',e:'象',a:'士',k:'将',c:'砲',p:'卒',R:'車',N:'馬',H:'馬',B:'相',E:'相',A:'仕',K:'帅',C:'炮',P:'兵'};
 function cfg(){try{return JSON.parse(localStorage.getItem(STORAGE_KEY)||'{}')}catch{return {}}}
-function authHeaders(){const t=(cfg().token||'').trim();return t?{Authorization:'Bearer '+t}:{}}
+function authHeaders(){const c=cfg();const t=(c.adminToken||c.token||'').trim();return t?{Authorization:'Bearer '+t}:{}}
+function hasAdminToken(){return !!(cfg().adminToken||'').trim()}
 function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 let cachedRedName='',cachedBlackName='',matchPaused=false;
 let cachedRedAvatar='',cachedBlackAvatar='';
@@ -61,6 +62,7 @@ function renderBoard(fen){
   for(let r=0;r<10;r++)for(let c=0;c<9;c++){
     const cell=document.createElement('div'); cell.className='xq-cell';
     if(c===0) cell.classList.add('edge-l'); if(c===8) cell.classList.add('edge-r'); if(r===0) cell.classList.add('edge-t'); if(r===9) cell.classList.add('edge-b');
+    if(r===4) cell.classList.add('river-top'); if(r===5) cell.classList.add('river-bottom');
     if((r===4||r===5)&&c>0&&c<8) cell.classList.add('river-gap');
     if(r===4&&c===1){ cell.classList.add('river-left'); cell.innerHTML='<span class="river-text">楚河</span>'; }
     if(r===4&&c===6){ cell.classList.add('river-right'); cell.innerHTML='<span class="river-text">汉界</span>'; }
@@ -135,13 +137,13 @@ function updateTurnBanner(ply,paused){
 }
 async function stopMatch(){
   if(!confirm('确定停止这局吗？停止后双方 Bot 不会继续下。')) return;
-  const h=authHeaders(); if(!h.Authorization){alert('先去个人设置填入本局任一参与 Bot 的 token。'); location.href='/settings'; return;}
+  const h=authHeaders(); if(!h.Authorization){alert('先去个人设置填入本局任一参与 Bot 的 token；管理员可填管理员 token。'); location.href='/settings'; return;}
   const r=await fetch(`/api/matches/${matchId}/stop`,{method:'POST',headers:h});
   const text=await r.text(); if(!r.ok){alert('停止失败：'+text); return;}
   await load(); alert('已停止本局');
 }
 async function pauseMatch(){
-  const h=authHeaders(); if(!h.Authorization){alert('先去个人设置填入本局任一参与 Bot 的 token。'); location.href='/settings'; return;}
+  const h=authHeaders(); if(!h.Authorization){alert('先去个人设置填入本局任一参与 Bot 的 token；管理员可填管理员 token。'); location.href='/settings'; return;}
   const r=await fetch(`/api/matches/${matchId}/pause`,{method:'POST',headers:h});
   if(!r.ok){const text=await r.text(); alert('暂停失败：'+text); return;}
   const data=await r.json();
@@ -150,8 +152,18 @@ async function pauseMatch(){
     updateTurnBannerContent('active',data.match.turn,data.match.ply,matchPaused,null,cachedRedName,cachedBlackName);
   }
 }
+async function stopAllMatches(){
+  if(!hasAdminToken()){alert('只有管理员能一键停止全部，请先在个人设置填管理员 token。'); location.href='/settings'; return;}
+  if(!confirm('确定停止所有正在进行的棋局吗？这个操作只有管理员能做。')) return;
+  const r=await fetch('/api/admin/matches/stop_all',{method:'POST',headers:authHeaders()});
+  const text=await r.text(); if(!r.ok){alert('一键停止失败：'+text); return;}
+  const data=JSON.parse(text||'{}');
+  await load(); alert(`已停止 ${data.stopped||0} 局`);
+}
 const stopBtn=$('#stopMatchBtn'); if(stopBtn)stopBtn.onclick=()=>stopMatch().catch(e=>alert('停止异常：'+e.message));
 const pauseBtn=$('#pauseMatchBtn'); if(pauseBtn)pauseBtn.onclick=()=>pauseMatch().catch(e=>alert('暂停异常：'+e.message));
+const stopAllBtn=$('#stopAllMatchesBtn'); if(stopAllBtn)stopAllBtn.onclick=()=>stopAllMatches().catch(e=>alert('一键停止异常：'+e.message));
+if(!hasAdminToken()&&stopAllBtn)stopAllBtn.classList.add('hidden');
 
 // ── SSE Spectator ──
 function connectSSE(){

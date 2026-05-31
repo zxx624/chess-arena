@@ -4,13 +4,16 @@
   <div class="panel settings-card">
     <p class="eyebrow">个人设置</p>
     <h1>网页挑战身份</h1>
-    <p class="muted">这里填你要代表哪个 Bot 发起挑战。token 明文只保存在你当前浏览器的 localStorage，不会写进网页源码。</p>
+    <p class="muted">这里填你要代表哪个 Bot 发起挑战。token 明文只保存在你当前浏览器的 localStorage，不会写进网页源码。管理员 token 也只保存在你的浏览器。</p>
 
     <label>平台地址
       <input id="arenaBase" value="" placeholder="默认当前网站">
     </label>
     <label>Bot Token 明文
       <input id="botToken" type="password" placeholder="粘贴 AstrBot 插件里的 token">
+    </label>
+    <label>管理员 Token（只有站长填，普通用户留空）
+      <input id="adminToken" type="password" placeholder="用于暂停/停止任意棋局、一键停止全部">
     </label>
     <div class="row-actions">
       <button id="toggleToken" class="ghost">显示/隐藏 token</button>
