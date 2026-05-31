@@ -30,7 +30,7 @@ function renderAvatarEl(el,name,avatarUrl,cls){
     el.textContent=(name||'?').slice(0,1);
   }
 }
-async function load(){const r=await fetch(`/api/admin/matches/${matchId}`); if(!r.ok)throw new Error(await r.text()); const m=await r.json(); cachedRedName=m.red_bot_name; cachedBlackName=m.black_bot_name; cachedRedAvatar=m.red_bot_avatar_url||''; cachedBlackAvatar=m.black_bot_avatar_url||''; matchPaused=!!m.paused; capturedByRed=[]; capturedByBlack=[]; (m.moves||[]).forEach(function(mv){if(mv.captured){if(mv.side==='red')capturedByRed.push(mv.captured);else capturedByBlack.push(mv.captured);}}); render(m)}
+async function load(){const r=await fetch(`/api/admin/matches/${matchId}`); if(!r.ok)throw new Error(await r.text()); const m=await r.json(); cachedRedName=m.red_bot_name; cachedBlackName=m.black_bot_name; cachedRedAvatar=m.red_bot_avatar_url||''; cachedBlackAvatar=m.black_bot_avatar_url||''; matchPaused=!!m.paused; capturedByRed=[]; capturedByBlack=[]; (m.moves||[]).forEach(function(mv){if(mv.captured){if(mv.side==='red')capturedByRed.push(mv.captured);else capturedByBlack.push(mv.captured);}}); render(m); if(typeof markAudioStateLoaded==='function')markAudioStateLoaded(m.ply||0)}
 function render(m){
   $('#matchStatus').textContent=`${m.status} · ${m.result||'进行中'} · ${m.ply}手`; $('#updatedAt').textContent=' · '+new Date((m.updated_at||0)*1000).toLocaleString();
   $('#redName').textContent=m.red_bot_name||m.red_bot_id; $('#redId').textContent=m.red_bot_id; $('#blackName').textContent=m.black_bot_name||m.black_bot_id; $('#blackId').textContent=m.black_bot_id;
@@ -181,36 +181,42 @@ function connectSSE(){
       bar.style.color='var(--green)';
       try{
         const d=JSON.parse(e.data);
-        // Core rendering must never be blocked by optional audio/popup features.
-        if(d.fen&&!isReplayLocked()){
-          try{renderBoard(d.fen); $('#fenText').textContent=d.fen;}catch(boardErr){console.error('board render error',boardErr)}
-        }
-        if(d.status!=null&&d.ply!=null){
-          try{
-            updateStatusFromSSE(d.status,d.result,d.ply,d.paused);
-            if(d.status!=='active'&&!gameIsOver&&d.moves&&d.moves.length>0){
-              checkGameOver(d.status,d.result,'',
-                d.moves,cachedRedName,cachedBlackName,cachedRedAvatar,cachedBlackAvatar);
-            }
-          }catch(statusErr){console.error('status render error',statusErr)}
-        }
-        if(d.moves){
-          try{
-            renderMovesFromSSE(d.moves,d.last_move||d.moves[d.moves.length-1]);
-            // Rebuild captured lists from moves
-            capturedByRed=[]; capturedByBlack=[];
-            (d.moves||[]).forEach(function(mv){if(mv.captured){if(mv.side==='red')capturedByRed.push(mv.captured);else capturedByBlack.push(mv.captured);}});
-            if(!isReplayLocked())renderCaptured();
-          }catch(movesErr){console.error('moves render error',movesErr)}
-        }
-        if(d.ply!=null&&d.status==='active'){
-          try{
-            matchPaused=!!d.paused;
-            updateTurnBanner(d.ply,matchPaused);
-          }catch(turnErr){console.error('turn render error',turnErr)}
-        }
-        // Audio is optional; it must not break board updates.
-        try{if(typeof handleSSEAudio==='function')handleSSEAudio(d);}catch(audioErr){console.warn('audio error',audioErr)}
+        const renderSSEState=function(){
+          // Core rendering must never be broken by optional audio/popup features.
+          if(d.fen&&!isReplayLocked()){
+            try{renderBoard(d.fen); $('#fenText').textContent=d.fen;}catch(boardErr){console.error('board render error',boardErr)}
+          }
+          if(d.status!=null&&d.ply!=null){
+            try{
+              updateStatusFromSSE(d.status,d.result,d.ply,d.paused);
+              if(d.status!=='active'&&!gameIsOver&&d.moves&&d.moves.length>0){
+                checkGameOver(d.status,d.result,'',
+                  d.moves,cachedRedName,cachedBlackName,cachedRedAvatar,cachedBlackAvatar);
+              }
+            }catch(statusErr){console.error('status render error',statusErr)}
+          }
+          if(d.moves){
+            try{
+              renderMovesFromSSE(d.moves,d.last_move||d.moves[d.moves.length-1]);
+              // Rebuild captured lists from moves
+              capturedByRed=[]; capturedByBlack=[];
+              (d.moves||[]).forEach(function(mv){if(mv.captured){if(mv.side==='red')capturedByRed.push(mv.captured);else capturedByBlack.push(mv.captured);}});
+              if(!isReplayLocked())renderCaptured();
+            }catch(movesErr){console.error('moves render error',movesErr)}
+          }
+          if(d.ply!=null&&d.status==='active'){
+            try{
+              matchPaused=!!d.paused;
+              updateTurnBanner(d.ply,matchPaused);
+            }catch(turnErr){console.error('turn render error',turnErr)}
+          }
+          // Audio is optional; it must not break board updates.
+          try{if(typeof handleSSEAudio==='function')handleSSEAudio(d);}catch(audioErr){console.warn('audio error',audioErr)}
+        };
+        try{
+          if(typeof playBotSpeechBeforeRender==='function')playBotSpeechBeforeRender(d,renderSSEState);
+          else renderSSEState();
+        }catch(audioErr){console.warn('bot speech error',audioErr);renderSSEState();}
       }catch(err){console.error('SSE parse error',err)}
     });
     es.addEventListener('open',()=>{

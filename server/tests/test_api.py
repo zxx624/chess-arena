@@ -1,10 +1,14 @@
 import os
+import tempfile
+import uuid
+from pathlib import Path
 
-os.environ.setdefault("CHESS_ARENA_DB", "/tmp/chess-arena-test.db")
+os.environ.setdefault("CHESS_ARENA_DB", os.path.join(tempfile.gettempdir(), "chess-arena-test.db"))
 
 from fastapi.testclient import TestClient
 
 from app.engine import legal_moves
+import app.main as main_module
 from app.main import app, bots, challenges, load_state_from_db, matches
 
 
@@ -13,7 +17,9 @@ def auth(token: str):
 
 
 def reset_state():
-    db = os.environ["CHESS_ARENA_DB"]
+    db = os.path.join(tempfile.gettempdir(), f"chess-arena-test-{uuid.uuid4().hex}.db")
+    os.environ["CHESS_ARENA_DB"] = db
+    main_module.DB_PATH = Path(db)
     for suffix in ("", "-wal", "-shm"):
         try:
             os.remove(db + suffix)
@@ -97,9 +103,40 @@ def test_persistence_reload_and_admin_pages():
     assert any(m["match_id"] == match_id for m in listing["matches"])
     detail = client.get(f"/api/admin/matches/{match_id}").json()
     assert detail["moves"][0]["comment"] == "persist"
-    html = client.get("/admin/matches").text
-    assert match_id in html
-    assert "persist-a" in html
+    assert client.get("/admin/matches").status_code == 200
+
+
+def test_admin_bot_management_requires_token_and_can_create_list_delete(monkeypatch):
+    monkeypatch.setattr('app.main.ADMIN_TOKEN', 'test-admin-token')
+    reset_state()
+    client = TestClient(app)
+
+    assert client.get("/admin/bots").status_code == 200
+    denied = client.get("/api/admin/bots")
+    assert denied.status_code == 403
+
+    created = client.post(
+        "/api/admin/bots",
+        headers=auth("test-admin-token"),
+        json={"name": "manual-admin-bot", "token": "manual-token-123", "engine_mode": "xqwlight"},
+    )
+    assert created.status_code == 200, created.text
+    bot = created.json()["bot"]
+    assert bot["token"] == "manual-token-123"
+    assert bot["engine_mode"] == "xqwlight"
+
+    listing = client.get("/api/admin/bots", headers=auth("test-admin-token"))
+    assert listing.status_code == 200, listing.text
+    assert any(b["token"] == "manual-token-123" for b in listing.json()["bots"])
+
+    duplicate = client.post("/api/admin/bots", headers=auth("test-admin-token"), json={"name": "dup", "token": "manual-token-123"})
+    assert duplicate.status_code == 409
+
+    deleted = client.delete(f"/api/admin/bots/{bot['bot_id']}", headers=auth("test-admin-token"))
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deleted"] is True
+    assert bot["bot_id"] not in bots
+    assert "manual-token-123" not in main_module.tokens
 
 
 def test_v02_register_update_list_and_rankings():

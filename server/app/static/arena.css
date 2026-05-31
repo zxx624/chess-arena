@@ -457,19 +457,23 @@ button:disabled {
 
 /* ===== Side Panel ===== */
 .side-panel {
-  max-height: calc(100vh - 100px);
-  overflow-y: auto;
   position: sticky;
   top: 70px;
 }
 
-.side-panel h2 {
-  font-size: 16px;
-  margin: 16px 0 8px;
+.home-two-column {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
 }
 
-.side-panel h2:first-child {
-  margin-top: 0;
+.home-side-card {
+  min-width: 0;
+}
+
+.side-panel h2 {
+  font-size: 16px;
+  margin: 0 0 8px;
 }
 
 .ranking {
@@ -527,6 +531,24 @@ button:disabled {
 
 .match-list a:hover {
   background: rgba(183, 137, 67, .06);
+}
+
+.recent-match-list {
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+@media (max-width: 1180px) {
+  .home-two-column {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 860px) {
+  .side-panel {
+    position: static;
+  }
 }
 
 /* ===== Section Title ===== */
@@ -1365,6 +1387,77 @@ button:disabled {
 .audio-btn.off {
   opacity: .45;
   text-decoration: line-through;
+}
+
+/* ===== Admin Bot Management ===== */
+.admin-layout {
+  grid-template-columns: minmax(280px, 420px) minmax(280px, 420px);
+}
+
+.admin-wide-card {
+  grid-column: 1 / -1;
+}
+
+.compact-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.admin-bot-table {
+  width: 100%;
+  min-width: 920px;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.admin-bot-table th,
+.admin-bot-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.admin-bot-table th {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: .04em;
+  border-bottom-width: 2px;
+}
+
+.admin-bot-table tbody tr:hover {
+  background: rgba(183, 137, 67, .06);
+}
+
+.token-code {
+  display: block;
+  max-width: 430px;
+  white-space: normal;
+  word-break: break-all;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.mini-text {
+  font-size: 12px;
+}
+
+.admin-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+@media (max-width: 900px) {
+  .admin-layout,
+  .compact-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ===== Utility ===== */

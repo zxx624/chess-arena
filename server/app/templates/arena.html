@@ -41,16 +41,22 @@
     <div class="section-title"><h2>Bot 列表</h2><span id="pickedHint"></span></div>
     <div id="botGrid" class="bot-grid"></div>
   </div>
-  <aside class="panel side-panel">
-    <h2>排行榜</h2>
-    <ol id="rankingList" class="ranking"></ol>
-    <h2>最近对局</h2>
-    <div id="matchList" class="match-list">
-      {% for m in recent_matches or [] %}
-        <a href="/matches/{{ m.id }}"><b>{{ bot_name(m.red_bot_id) }}</b> vs <b>{{ bot_name(m.black_bot_id) }}</b><br><span class="muted">{{ m.id }} · {{ m.status }} · {{ m.ply }} 手</span></a>
-      {% else %}
-        <p class="muted">暂无对局</p>
-      {% endfor %}
+  <aside class="side-panel">
+    <div class="home-two-column">
+      <section class="panel home-side-card">
+        <h2>排行榜</h2>
+        <ol id="rankingList" class="ranking"></ol>
+      </section>
+      <section class="panel home-side-card">
+        <h2>最近对局</h2>
+        <div id="matchList" class="match-list recent-match-list">
+          {% for m in recent_matches or [] %}
+            <a href="/matches/{{ m.id }}"><b>{{ bot_name(m.red_bot_id) }}</b> vs <b>{{ bot_name(m.black_bot_id) }}</b><br><span class="muted">{{ m.id }} · {{ m.status }} · {{ m.ply }} 手</span></a>
+          {% else %}
+            <p class="muted">暂无对局</p>
+          {% endfor %}
+        </div>
+      </section>
     </div>
   </aside>
 </section>

@@ -19,9 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-import aiohttp
-
-from .engine import BLACK, INITIAL_FEN, RED, RuleError, apply_ucci, legal_moves, parse_fen
+from .engine import BLACK, INITIAL_FEN, RED, RuleError, apply_ucci, is_in_check, legal_moves, parse_fen
 
 DB_PATH = Path(os.environ.get("CHESS_ARENA_DB", "/mnt/cosmem/gulu1-1415708756/chess-arena/chess_arena.db"))
 BASE_DIR = Path(__file__).resolve().parent
@@ -144,6 +142,20 @@ class MoveReq(BaseModel):
 class AnalyzeReq(BaseModel):
     fen: str
     depth: int = 3
+
+
+class AdminBotCreateReq(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    token: str | None = None
+    avatar_url: str | None = None
+    description: str | None = None
+    chess_style: str = "random"
+    persona_prompt: str | None = None
+    engine_mode: str = "random"
+    client_type: str = "manual"
+    instance_name: str | None = None
+    is_public: bool = True
+    is_enabled: bool = True
 
 
 def db_connect() -> sqlite3.Connection:
@@ -460,6 +472,27 @@ def bot_with_ranking(bot: Bot) -> dict[str, Any]:
     data = bot_public(bot)
     data.update(ranking_for(bot.id))
     return data
+
+
+def admin_bot_payload(bot: Bot) -> dict[str, Any]:
+    data = bot_with_ranking(bot)
+    data["token"] = bot.token
+    data["token_hint"] = token_hint(bot.token)
+    return data
+
+
+def delete_bot_from_db(bot_id: str) -> None:
+    with db_connect() as conn:
+        match_ids = [row["id"] for row in conn.execute("SELECT id FROM matches WHERE red_bot_id = ? OR black_bot_id = ?", (bot_id, bot_id)).fetchall()]
+        for match_id in match_ids:
+            conn.execute("DELETE FROM moves WHERE match_id = ?", (match_id,))
+            conn.execute("DELETE FROM rating_history WHERE match_id = ?", (match_id,))
+        conn.execute("DELETE FROM matches WHERE red_bot_id = ? OR black_bot_id = ?", (bot_id, bot_id))
+        conn.execute("DELETE FROM challenges WHERE challenger_bot_id = ? OR opponent_bot_id = ?", (bot_id, bot_id))
+        conn.execute("DELETE FROM match_queue WHERE bot_id = ?", (bot_id,))
+        conn.execute("DELETE FROM rating_history WHERE bot_id = ?", (bot_id,))
+        conn.execute("DELETE FROM rankings WHERE bot_id = ?", (bot_id,))
+        conn.execute("DELETE FROM bots WHERE id = ?", (bot_id,))
 
 
 def update_rankings_for_finished_match(m: Match) -> None:
@@ -1097,6 +1130,55 @@ async def api_admin_match(match_id: str) -> dict[str, Any]:
     return match_public(m, include_legal_moves=False)
 
 
+@app.get("/api/admin/bots")
+async def api_admin_bots(_: None = Depends(require_admin)) -> dict[str, Any]:
+    items = sorted(bots.values(), key=lambda b: (b.online_status != "online", b.name.lower()))
+    return {"total": len(items), "bots": [admin_bot_payload(b) for b in items]}
+
+
+@app.post("/api/admin/bots")
+async def api_admin_create_bot(req: AdminBotCreateReq, _: None = Depends(require_admin)) -> dict[str, Any]:
+    token = (req.token or secrets.token_urlsafe(32)).strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="token cannot be empty")
+    async with state_lock:
+        if token in tokens:
+            raise HTTPException(status_code=409, detail="token already exists")
+        now = time.time()
+        bot = Bot(
+            id=new_id("bot"), name=req.name, token=token, created_at=now, updated_at=now,
+            avatar_url=req.avatar_url, description=req.description, chess_style=req.chess_style or "random",
+            persona_prompt=req.persona_prompt, engine_mode=req.engine_mode or "random", client_type=req.client_type or "manual",
+            instance_name=req.instance_name, is_public=req.is_public, is_enabled=req.is_enabled,
+        )
+        bots[bot.id] = bot
+        tokens[bot.token] = bot.id
+        save_bot(bot)
+    return {"bot": admin_bot_payload(bot)}
+
+
+@app.delete("/api/admin/bots/{bot_id}")
+async def api_admin_delete_bot(bot_id: str, _: None = Depends(require_admin)) -> dict[str, Any]:
+    async with state_lock:
+        bot = bots.get(bot_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="bot not found")
+        token = bot.token
+        deleted_matches = [m.id for m in matches.values() if m.red_bot_id == bot_id or m.black_bot_id == bot_id]
+        deleted_challenges = [c.id for c in challenges.values() if c.challenger_bot_id == bot_id or c.opponent_bot_id == bot_id]
+        for match_id in deleted_matches:
+            matches.pop(match_id, None)
+            match_sse_queues.pop(match_id, None)
+        for challenge_id in deleted_challenges:
+            challenges.pop(challenge_id, None)
+        match_queue_entries.pop(bot_id, None)
+        subscribers.pop(bot_id, None)
+        bots.pop(bot_id, None)
+        tokens.pop(token, None)
+        delete_bot_from_db(bot_id)
+    return {"deleted": True, "bot_id": bot_id, "deleted_matches": len(deleted_matches), "deleted_challenges": len(deleted_challenges)}
+
+
 @app.post("/api/admin/matches/backfill_rankings")
 async def backfill_rankings() -> dict[str, Any]:
     """Backfill rankings for all finished matches that haven't been scored yet."""
@@ -1134,6 +1216,11 @@ async def arena_page(request: Request) -> HTMLResponse:
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "settings.html", {"title": "接入设置"})
+
+
+@app.get("/admin/bots", response_class=HTMLResponse)
+async def admin_bots_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "admin_bots.html", {"title": "后台账号管理"})
 
 
 @app.get("/matches/{match_id}", response_class=HTMLResponse)
@@ -1237,6 +1324,11 @@ async def admin_stop_all(_: None = Depends(require_admin)) -> dict[str, Any]:
 async def analyze(req: AnalyzeReq, bot_id: str = Depends(x_bot_token)) -> dict[str, Any]:
     """Proxy analyze request to the xqwlight engine server."""
     try:
+        import aiohttp
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail="aiohttp dependency is not installed") from exc
+
+    try:
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(
@@ -1304,7 +1396,8 @@ async def make_move(match_id: str, req: MoveReq, bot: Bot = Depends(get_current_
         m.fen = new_fen
         m.ply += 1
         m.updated_at = time.time()
-        move_rec = {"move_id": new_id("move"), "ply": m.ply, "bot_id": bot.id, "side": turn, "move": req.move, "chinese_notation": ucci_to_chinese(req.move, old_fen), "comment": req.comment, "duration_ms": req.duration_ms, "fen_before": old_fen, "fen_after": new_fen, "captured": captured, "created_at": m.updated_at, "red_time_left_ms": m.red_time_left_ms, "black_time_left_ms": m.black_time_left_ms}
+        board_after, next_turn, _, _ = parse_fen(new_fen)
+        move_rec = {"move_id": new_id("move"), "ply": m.ply, "bot_id": bot.id, "side": turn, "move": req.move, "chinese_notation": ucci_to_chinese(req.move, old_fen), "comment": req.comment, "bot_speech": req.comment, "duration_ms": req.duration_ms, "fen_before": old_fen, "fen_after": new_fen, "captured": captured, "check": is_in_check(board_after, next_turn), "created_at": m.updated_at, "red_time_left_ms": m.red_time_left_ms, "black_time_left_ms": m.black_time_left_ms}
         m.moves.append(move_rec)
         if m.ply >= 200 and not finished:
             m.status = "finished"

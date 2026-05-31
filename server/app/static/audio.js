@@ -11,12 +11,20 @@ function saveAudioCfg(c) {
 // Default settings
 let sfxEnabled = true;
 let voiceEnabled = true;
+let botSpeechVoiceEnabled = true;
 
 (function initAudioCfg() {
   const c = audioCfg();
-  if (c.sfxEnabled !== undefined) sfxEnabled = c.sfxEnabled;
-  if (c.voiceEnabled !== undefined) voiceEnabled = c.voiceEnabled;
+  if (c.sfx !== undefined) sfxEnabled = c.sfx;
+  else if (c.sfxEnabled !== undefined) sfxEnabled = c.sfxEnabled;
+  if (c.voice !== undefined) voiceEnabled = c.voice;
+  else if (c.voiceEnabled !== undefined) voiceEnabled = c.voiceEnabled;
+  if (c.botSpeechVoice !== undefined) botSpeechVoiceEnabled = c.botSpeechVoice;
 })();
+
+function persistAudioCfg() {
+  saveAudioCfg({ sfx: sfxEnabled, voice: voiceEnabled, botSpeechVoice: botSpeechVoiceEnabled });
+}
 
 // ── Web Audio Engine ──
 let audioCtx = null;
@@ -244,6 +252,87 @@ function ucciToChinese(move, side) {
 // ── Speech Synthesis ──
 let speechQueue = [];
 let speaking = false;
+let chineseVoices = [];
+let speechUnlocked = false;
+
+function markSpeechUnlocked() {
+  speechUnlocked = true;
+}
+
+function warmupSpeech() {
+  if (!window.speechSynthesis) return;
+  markSpeechUnlocked();
+  try {
+    const u = new SpeechSynthesisUtterance('');
+    u.volume = 0;
+    u.lang = 'zh-CN';
+    window.speechSynthesis.speak(u);
+  } catch (e) {}
+}
+
+// WeChat/Chrome block speech/audio before a user gesture.  Default switches can
+// be ON visually, but real playback only becomes reliable after the first tap.
+if (typeof document !== 'undefined') {
+  ['pointerdown', 'touchstart', 'keydown'].forEach(evt => {
+    document.addEventListener(evt, warmupSpeech, { once: true, passive: true });
+  });
+}
+
+function refreshChineseVoices() {
+  if (!window.speechSynthesis) return [];
+  const voices = window.speechSynthesis.getVoices() || [];
+  chineseVoices = voices.filter(v => /^zh(-|_|$)/i.test(v.lang || ''));
+  chineseVoices.sort((a, b) => {
+    const acn = /^zh(-|_)CN/i.test(a.lang || '') ? 0 : 1;
+    const bcn = /^zh(-|_)CN/i.test(b.lang || '') ? 0 : 1;
+    return acn - bcn;
+  });
+  return chineseVoices;
+}
+
+if (window.speechSynthesis) {
+  refreshChineseVoices();
+  window.speechSynthesis.onvoiceschanged = refreshChineseVoices;
+}
+
+function pickChineseVoice() {
+  const voices = chineseVoices.length ? chineseVoices : refreshChineseVoices();
+  if (!voices.length) return null;
+  const zhCn = voices.filter(v => /^zh(-|_)CN/i.test(v.lang || ''));
+  const pool = zhCn.length ? zhCn : voices;
+  return pool[Math.floor(Math.random() * pool.length)] || null;
+}
+
+function randomPitch() {
+  return 0.9 + Math.random() * 0.25;
+}
+
+function speakText(text, opts) {
+  if (!text || !window.speechSynthesis) {
+    if (opts && typeof opts.onend === 'function') opts.onend();
+    return;
+  }
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = 'zh-CN';
+  utterance.rate = opts && opts.rate ? opts.rate : 0.9;
+  utterance.pitch = opts && opts.pitch ? opts.pitch : randomPitch();
+  utterance.volume = 0.9;
+  const voice = pickChineseVoice();
+  if (voice) utterance.voice = voice;
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    if (opts && typeof opts.onend === 'function') opts.onend();
+  };
+  utterance.onend = finish;
+  utterance.onerror = finish;
+  window.speechSynthesis.speak(utterance);
+  // Some browsers/WebView implementations silently never fire onend/onerror
+  // when speech is blocked before user interaction. Never let this block board rendering.
+  const timeoutMs = Math.max(1200, Math.min(8000, String(text).length * 180));
+  setTimeout(finish, timeoutMs);
+}
 
 function processSpeechQueue() {
   if (speaking || speechQueue.length === 0) return;
@@ -270,25 +359,18 @@ function speakChinese(text) {
   // Cancel any pending speech
   window.speechSynthesis.cancel();
   speechQueue = [];
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = 'zh-CN';
-  utterance.rate = 0.85;
-  utterance.pitch = 1.0;
-  utterance.volume = 0.9;
-  window.speechSynthesis.speak(utterance);
+  speakText(text, { rate: 0.9 });
 }
 
 // ── High-level helpers ──
-function announceMove(ucci, side, captured) {
+function announceMove(ucci, side, captured, isCheck) {
+  if (!captured && !isCheck) return;
   const cn = ucciToChinese(ucci, side);
   const sideName = side === 'red' ? '红方' : '黑方';
   let text = sideName + cn;
-  if (captured) {
-    const capName = (captured === captured.toUpperCase())
-      ? (UCCI_PIECE_RED[captured.toLowerCase()] || captured)
-      : (UCCI_PIECE[captured] || captured);
-    text += '吃' + capName;
-  }
+  if (captured && isCheck) text += '，吃子并将军';
+  else if (captured) text += '，吃子';
+  else if (isCheck) text += '，将军';
   speakChinese(text);
 }
 
@@ -301,7 +383,16 @@ function onMoveEvent(moveUcci, side, captured, isCheck) {
   if (isCheck) {
     setTimeout(() => SoundFX.check(), 250);
   }
-  announceMove(moveUcci, side, captured);
+  announceMove(moveUcci, side, captured, isCheck);
+}
+
+function speakBotSpeech(move, onDone) {
+  if (!botSpeechVoiceEnabled || !move || !move.bot_speech) {
+    if (typeof onDone === 'function') onDone();
+    return;
+  }
+  window.speechSynthesis.cancel();
+  speakText(move.bot_speech, { rate: 0.95, onend: onDone });
 }
 
 function onGameEnd(result) {
@@ -339,6 +430,9 @@ function createAudioToggles(containerEl) {
     '</button>' +
     '<button id="voiceToggle" class="audio-btn" title="语音播报开关">' +
     (voiceEnabled ? '📢 播报' : '🔕 播报') +
+    '</button>' +
+    '<button id="botSpeechToggle" class="audio-btn" title="Bot 台词语音开关">' +
+    (botSpeechVoiceEnabled ? '💬 Bot语音 开' : '💬 Bot语音 关') +
     '</button>';
   containerEl.appendChild(div);
 
@@ -352,7 +446,7 @@ function createAudioToggles(containerEl) {
     } else {
       this.classList.add('off');
     }
-    saveAudioCfg({ sfxEnabled, voiceEnabled });
+    persistAudioCfg();
   };
 
   document.getElementById('voiceToggle').onclick = function () {
@@ -360,35 +454,73 @@ function createAudioToggles(containerEl) {
     this.textContent = voiceEnabled ? '📢 播报' : '🔕 播报';
     if (voiceEnabled) {
       this.classList.remove('off');
-      // Warm up speech synthesis
-      const u = new SpeechSynthesisUtterance('');
-      u.volume = 0;
-      u.lang = 'zh-CN';
-      window.speechSynthesis.speak(u);
+      warmupSpeech();
     } else {
       this.classList.add('off');
       window.speechSynthesis.cancel();
     }
-    saveAudioCfg({ sfxEnabled, voiceEnabled });
+    persistAudioCfg();
+  };
+
+  document.getElementById('botSpeechToggle').onclick = function () {
+    botSpeechVoiceEnabled = !botSpeechVoiceEnabled;
+    this.textContent = botSpeechVoiceEnabled ? '💬 Bot语音 开' : '💬 Bot语音 关';
+    this.classList.toggle('off', !botSpeechVoiceEnabled);
+    if (botSpeechVoiceEnabled) {
+      warmupSpeech();
+    } else {
+      window.speechSynthesis.cancel();
+    }
+    persistAudioCfg();
   };
 
   // Apply initial off state
   if (!sfxEnabled) document.getElementById('sfxToggle').classList.add('off');
   if (!voiceEnabled) document.getElementById('voiceToggle').classList.add('off');
+  if (!botSpeechVoiceEnabled) document.getElementById('botSpeechToggle').classList.add('off');
 }
 
 // Track previous state for detecting changes
 let lastPly = -1;
 let lastStatus = '';
+let lastBotSpeechPly = -1;
 
 function resetAudioState() {
   lastPly = -1;
   lastStatus = '';
+  lastBotSpeechPly = -1;
+}
+
+function markAudioStateLoaded(ply) {
+  const n = Number(ply || 0);
+  lastPly = n;
+  lastBotSpeechPly = n;
+}
+
+function playBotSpeechBeforeRender(d, renderFn) {
+  if (!d) {
+    renderFn();
+    return;
+  }
+  const ply = Number(d.ply || (d.moves ? d.moves.length : 0));
+  const last = d.last_move || (d.moves && d.moves[d.moves.length - 1]);
+  if (ply > lastBotSpeechPly && last && last.bot_speech && botSpeechVoiceEnabled) {
+    lastBotSpeechPly = ply;
+    speakBotSpeech(last, renderFn);
+    return;
+  }
+  renderFn();
 }
 
 // Call this when new SSE match_state arrives
 function handleSSEAudio(d) {
   if (!d) return;
+
+  if (lastPly < 0) {
+    markAudioStateLoaded(d.ply || (d.moves ? d.moves.length : 0));
+    lastStatus = d.status || lastStatus;
+    return;
+  }
 
   // Detect game end
   if (d.status && d.status !== 'active' && d.status !== lastStatus) {
@@ -406,7 +538,7 @@ function handleSSEAudio(d) {
       for (let i = lastPly < 0 ? 0 : lastPly; i < newPly; i++) {
         const mv = d.moves[i];
         if (mv && mv.move) {
-          const isCheck = detectCheckFromComment(mv.comment);
+          const isCheck = mv.check === true || detectCheckFromComment(mv.comment);
           onMoveEvent(mv.move, mv.side, mv.captured, isCheck);
         }
       }

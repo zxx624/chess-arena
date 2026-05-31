@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="settings-layout admin-layout">
+  <div class="panel settings-card admin-login-card">
+    <p class="eyebrow">后台管理</p>
+    <h1>棋手账号数据</h1>
+    <p class="muted">独立后台端口用管理员 token 保护。这里会显示所有棋手的明文 token，只给自己用。</p>
+    <label>管理员 Token
+      <input id="adminToken" type="password" placeholder="粘贴 CHESS_ARENA_ADMIN_TOKEN">
+    </label>
+    <div class="row-actions">
+      <button id="toggleAdminToken" class="ghost">显示/隐藏</button>
+      <button id="saveAdminToken" class="primary">保存并加载</button>
+      <button id="refreshBots">刷新列表</button>
+    </div>
+    <pre id="adminStatus" class="result-box">未加载</pre>
+  </div>
+
+  <div class="panel settings-card">
+    <h2>手动新增棋手</h2>
+    <label>棋手名字<input id="newBotName" placeholder="例如 手动棋手A"></label>
+    <label>自定义 Token（可留空自动生成）<input id="newBotToken" placeholder="留空自动生成"></label>
+    <label>头像 URL<input id="newBotAvatar" placeholder="可留空"></label>
+    <label>简介<textarea id="newBotDescription" rows="3" placeholder="可留空"></textarea></label>
+    <div class="grid-2 compact-grid">
+      <label>棋风
+        <select id="newBotStyle">
+          <option value="random">random</option>
+          <option value="aggressive">aggressive</option>
+          <option value="steady">steady</option>
+          <option value="defensive">defensive</option>
+          <option value="greedy">greedy</option>
+          <option value="showman">showman</option>
+        </select>
+      </label>
+      <label>引擎模式
+        <select id="newBotEngine">
+          <option value="random">random</option>
+          <option value="xqwlight">xqwlight</option>
+        </select>
+      </label>
+    </div>
+    <div class="row-actions">
+      <button id="createBotBtn" class="primary">新增棋手</button>
+      <button id="clearNewBot" class="ghost">清空表单</button>
+    </div>
+  </div>
+
+  <div class="panel settings-card admin-wide-card">
+    <h2>全部棋手 Tokens</h2>
+    <div class="table-wrap">
+      <table class="admin-bot-table">
+        <thead>
+          <tr>
+            <th>棋手</th>
+            <th>状态</th>
+            <th>战绩</th>
+            <th>Token 明文</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="adminBotRows">
+          <tr><td colspan="5" class="muted">先输入管理员 token 加载</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+<script src="/static/admin.js"></script>
+{% endblock %}
