@@ -64,8 +64,6 @@ function renderBoard(fen){
     if(c===0) cell.classList.add('edge-l'); if(c===8) cell.classList.add('edge-r'); if(r===0) cell.classList.add('edge-t'); if(r===9) cell.classList.add('edge-b');
     if(r===4) cell.classList.add('river-top'); if(r===5) cell.classList.add('river-bottom');
     if((r===4||r===5)&&c>0&&c<8) cell.classList.add('river-gap');
-    if(r===4&&c===1){ cell.classList.add('river-left'); cell.innerHTML='<span class="river-text">楚河</span>'; }
-    if(r===4&&c===6){ cell.classList.add('river-right'); cell.innerHTML='<span class="river-text">汉界</span>'; }
     // Palace diagonals: draw only on center cell of each palace, lines span full 3x3
     if((r===1&&c===4)||(r===8&&c===4)){
       const d1=document.createElement('span'); d1.className='palace-line d1'; const d2=document.createElement('span'); d2.className='palace-line d2'; cell.append(d1,d2);
@@ -84,6 +82,12 @@ function renderBoard(fen){
     if(r===9){ cell.setAttribute('data-coord','file-'+'abcdefghi'[c]); }
     if(c===8){ cell.setAttribute('data-coord','rank-'+r); }
     board.appendChild(cell);
+    if(r===4&&c===8){
+      const river=document.createElement('div');
+      river.className='river-band';
+      river.innerHTML='<span class="river-text river-text-left">楚河</span><span class="river-text river-text-right">汉界</span>';
+      board.appendChild(river);
+    }
   }
   // Place pieces on top
   const cells=board.querySelectorAll('.xq-cell');
