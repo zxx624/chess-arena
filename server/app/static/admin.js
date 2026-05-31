@@ -2,6 +2,7 @@ const ADMIN_KEY = 'chessArenaAdminToken';
 
 function $(id) { return document.getElementById(id); }
 function setStatus(msg) { $('adminStatus').textContent = msg; }
+function setBotCount(n) { const el = $('botCount'); if (el) el.textContent = `${n || 0} 个`; }
 function adminToken() { return ($('adminToken').value || localStorage.getItem(ADMIN_KEY) || '').trim(); }
 function authHeaders() { return { 'Authorization': `Bearer ${adminToken()}` }; }
 function escapeHtml(s) {
@@ -27,8 +28,10 @@ function renderBots(bots) {
   const tbody = $('adminBotRows');
   if (!bots.length) {
     tbody.innerHTML = '<tr><td colspan="5" class="muted">暂无棋手</td></tr>';
+    setBotCount(0);
     return;
   }
+  setBotCount(bots.length);
   tbody.innerHTML = bots.map(b => `
     <tr data-bot-id="${escapeHtml(b.bot_id)}">
       <td>

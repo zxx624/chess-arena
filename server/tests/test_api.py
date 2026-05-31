@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.engine import legal_moves
 import app.main as main_module
-from app.main import app, bots, challenges, load_state_from_db, matches
+from app.main import app, bots, challenges, load_state_from_db, matches, Bot, save_bot
 
 
 def auth(token: str):
@@ -137,6 +137,26 @@ def test_admin_bot_management_requires_token_and_can_create_list_delete(monkeypa
     assert deleted.json()["deleted"] is True
     assert bot["bot_id"] not in bots
     assert "manual-token-123" not in main_module.tokens
+
+
+def test_api_bots_refreshes_external_db_changes():
+    reset_state()
+    client = TestClient(app)
+    external = Bot(
+        id="bot_external_sync",
+        name="external-sync-bot",
+        token="external-sync-token",
+        created_at=123456.0,
+        updated_at=123456.0,
+    )
+    save_bot(external)
+    assert "bot_external_sync" not in bots
+
+    listing = client.get("/api/bots", params={"q": "external-sync-bot"}).json()
+    assert listing["total"] == 1
+    assert listing["bots"][0]["bot_id"] == "bot_external_sync"
+    assert bots["bot_external_sync"].name == "external-sync-bot"
+    assert main_module.tokens["external-sync-token"] == "bot_external_sync"
 
 
 def test_v02_register_update_list_and_rankings():

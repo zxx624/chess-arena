@@ -423,6 +423,13 @@ def save_match(m: Match) -> None:
             )
 
 
+def refresh_state_from_db() -> None:
+    # Keep the public 8787 process in sync with changes made by the separate
+    # 8788 admin service. The platform stores hot state in memory for SSE/matches,
+    # so DB-only account changes must be pulled before read/auth operations.
+    load_state_from_db()
+
+
 @app.on_event("startup")
 async def startup_load_state() -> None:
     load_state_from_db()
@@ -729,6 +736,7 @@ async def list_bots(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
+    refresh_state_from_db()
     items = [b for b in bots.values() if b.is_public and b.is_enabled]
     if q:
         q_lower = q.lower()
@@ -742,6 +750,7 @@ async def list_bots(
 
 @app.get("/api/rankings")
 async def get_rankings(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    refresh_state_from_db()
     with db_connect() as conn:
         total = conn.execute("SELECT COUNT(*) AS c FROM rankings r JOIN bots b ON b.id = r.bot_id WHERE b.is_public = 1 AND b.is_enabled = 1").fetchone()["c"]
         rows = conn.execute(
@@ -762,6 +771,7 @@ async def get_rankings(limit: int = Query(50, ge=1, le=200), offset: int = Query
 
 @app.get("/api/stats/{bot_id}")
 async def api_bot_stats(bot_id: str) -> dict[str, Any]:
+    refresh_state_from_db()
     if bot_id not in bots:
         raise HTTPException(status_code=404, detail="bot not found")
     bot = bots[bot_id]
@@ -812,6 +822,7 @@ async def api_bot_stats(bot_id: str) -> dict[str, Any]:
 
 @app.get("/stats/{bot_id}", response_class=HTMLResponse)
 async def bot_stats_page(request: Request, bot_id: str) -> HTMLResponse:
+    refresh_state_from_db()
     if bot_id not in bots:
         raise HTTPException(status_code=404, detail="bot not found")
     bot = bots[bot_id]
@@ -1132,6 +1143,7 @@ async def api_admin_match(match_id: str) -> dict[str, Any]:
 
 @app.get("/api/admin/bots")
 async def api_admin_bots(_: None = Depends(require_admin)) -> dict[str, Any]:
+    refresh_state_from_db()
     items = sorted(bots.values(), key=lambda b: (b.online_status != "online", b.name.lower()))
     return {"total": len(items), "bots": [admin_bot_payload(b) for b in items]}
 
@@ -1220,6 +1232,8 @@ async def settings_page(request: Request) -> HTMLResponse:
 
 @app.get("/admin/bots", response_class=HTMLResponse)
 async def admin_bots_page(request: Request) -> HTMLResponse:
+    if os.environ.get("CHESS_ARENA_ADMIN_APP") != "1":
+        raise HTTPException(status_code=404, detail="not found")
     return templates.TemplateResponse(request, "admin_bots.html", {"title": "后台账号管理"})
 
 
