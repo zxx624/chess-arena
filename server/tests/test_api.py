@@ -111,7 +111,9 @@ def test_admin_bot_management_requires_token_and_can_create_list_delete(monkeypa
     reset_state()
     client = TestClient(app)
 
-    assert client.get("/admin/bots").status_code == 200
+    # Account management UI lives in the separate chess-arena-admin app on port 8788.
+    # The public chess app must not expose the admin bots page.
+    assert client.get("/admin/bots").status_code == 404
     denied = client.get("/api/admin/bots")
     assert denied.status_code == 403
 

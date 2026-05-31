@@ -6,6 +6,11 @@ function saveCfg(x){localStorage.setItem(STORAGE_KEY,JSON.stringify({...cfg(),..
 function authHeaders(){const t=(cfg().token||'').trim();return t?{Authorization:'Bearer '+t}:{}}
 function normBots(payload){return Array.isArray(payload)?payload:(payload.bots||[])}
 function rankFor(id){return state.rankings.find(r=>r.bot_id===id)||{rating:1000,games:0,wins:0,losses:0,draws:0,win_rate:0}}
+function styleLabel(style){
+  const s=(style||'random').toLowerCase();
+  const map={aggressive:'进攻',defensive:'防守',balanced:'均衡',random:'随性',positional:'布局',tactical:'战术',steady:'稳健',greedy:'贪吃',showman:'表演'};
+  return map[s]||style||'随性';
+}
 
 // ── Avatar helpers ──
 function avatarGradient(name){
@@ -45,9 +50,9 @@ function renderBots(){
   list.forEach(b=>{const r=rankFor(b.bot_id); const el=tpl.content.firstElementChild.cloneNode(true); el.dataset.id=b.bot_id;
     const isMe=state.me&&state.me.bot_id===b.bot_id; el.classList.toggle('selected',state.selected===b.bot_id); if(isMe)el.classList.add('is-me');
     renderAvatar(el.querySelector('.avatar'),b.name||b.bot_id,b.avatar_url); el.querySelector('h3').textContent=(b.name||b.bot_id)+(isMe?'（我）':'');
-    el.querySelector('.desc').textContent=`${b.chess_style||'random'} · ${b.description||'暂无简介'}`;
-    el.querySelector('.bot-id').textContent=b.bot_id; const st=el.querySelector('.status'); st.textContent=b.online_status==='online'?'在线':'离线'; st.classList.toggle('online',b.online_status==='online');
-    el.querySelector('.record').textContent=`Rating ${r.rating} · ${r.games}局 ${r.wins}胜/${r.losses}负/${r.draws}和`;
+    el.querySelector('.desc').textContent=`${styleLabel(b.chess_style)} · ${b.description||'暂无简介'}`;
+    const st=el.querySelector('.status'); st.textContent=b.online_status==='online'?'在线':'离线'; st.classList.toggle('online',b.online_status==='online');
+    el.querySelector('.record').textContent=`${r.rating} 分 · ${r.games} 局 · ${Math.round((r.win_rate||0)*100)}%`;
     el.querySelector('.pick').onclick=()=>{state.selected=b.bot_id;$('#pickedHint').textContent=`已选择：${b.name}`;renderBots()};
     const btn=el.querySelector('.challenge'); const isOffline=b.online_status!=='online'; btn.disabled=!!isMe||isOffline; btn.textContent=isMe?'自己':isOffline?'离线':'挑战'; if(!isOffline&&!isMe)btn.onclick=()=>challenge(b);
             el.querySelector('.stats-link').href=`/stats/${b.bot_id}`;
@@ -63,8 +68,8 @@ async function challenge(opponent){
   waitMatch(ch.challenge_id);
 }
 async function waitMatch(challengeId){for(let i=0;i<40;i++){const data=await json('/api/admin/matches?limit=20'); const m=(data.matches||[]).find(x=>x.challenge_id===challengeId); if(m){location.href='/matches/'+m.match_id;return} await new Promise(r=>setTimeout(r,1000))} alert('已发出挑战，但暂未生成对局。对手插件可能没在线或没自动接挑战。')}
-function renderRankings(){const ol=$('#rankingList');ol.innerHTML='';state.rankings.forEach(r=>{const li=document.createElement('li');li.className='ranking-item';const av=document.createElement('span');renderAvatar(av,r.name,r.avatar_url,'ranking-avatar');li.appendChild(av);const info=document.createElement('span');info.className='ranking-info';info.textContent=r.name+' · '+r.rating+' · '+r.games+'局';li.appendChild(info);ol.appendChild(li)}); if(!state.rankings.length)ol.innerHTML='<li class="muted">暂无排行</li>'}
-function renderMatches(ms){const box=$('#matchList');box.innerHTML='';if(!ms.length){box.innerHTML='<p class="muted">暂无对局</p>';return}ms.forEach(m=>{const a=document.createElement('a');a.href=`/matches/${m.match_id}`;let result='';if(m.result==='red_win')result='🔴红胜';else if(m.result==='black_win')result='⚫黑胜';else if(m.result==='draw')result='🤝和棋';else if(m.status==='active')result='▶进行中';else result=m.status;a.innerHTML=`<b>${m.red_bot_name}</b> vs <b>${m.black_bot_name}</b><br><span class="muted">${result} · ${m.ply} 手</span>`;box.appendChild(a)})}
+function renderRankings(){const ol=$('#rankingList');ol.innerHTML='';state.rankings.slice(0,8).forEach((r,i)=>{const li=document.createElement('li');li.className='ranking-item';const av=document.createElement('span');renderAvatar(av,r.name,r.avatar_url,'ranking-avatar');li.appendChild(av);const info=document.createElement('span');info.className='ranking-info';info.textContent=`${i+1}. ${r.name} · ${r.rating}`;li.appendChild(info);ol.appendChild(li)}); if(!state.rankings.length)ol.innerHTML='<li class="muted">暂无排行</li>'}
+function renderMatches(ms){const box=$('#matchList');box.innerHTML='';if(!ms.length){box.innerHTML='<p class="muted">暂无对局</p>';return}ms.slice(0,8).forEach(m=>{const a=document.createElement('a');a.href=`/matches/${m.match_id}`;let result='';if(m.result==='red_win')result='红胜';else if(m.result==='black_win')result='黑胜';else if(m.result==='draw')result='和棋';else if(m.status==='active')result='进行中';else result=m.status;a.innerHTML=`<b>${m.red_bot_name}</b> vs <b>${m.black_bot_name}</b><span class="muted"> · ${result}</span>`;box.appendChild(a)})}
 $('#search').addEventListener('input',renderBots);$('#onlineOnly').addEventListener('change',renderBots);$('#refreshBtn').onclick=load;
 $('#randomBtn').onclick=()=>{const pool=state.bots.filter(b=>(!state.me||b.bot_id!==state.me.bot_id)&&(!$('#onlineOnly').checked||b.online_status==='online'));if(!pool.length)return;const b=pool[Math.floor(Math.random()*pool.length)];state.selected=b.bot_id;$('#pickedHint').textContent=`随机选中：${b.name}`;renderBots()};
 
