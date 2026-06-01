@@ -672,10 +672,16 @@ def ensure_match_control_allowed(m: Match, bot: Bot | None, is_admin: bool) -> N
         raise HTTPException(status_code=403, detail="only participants or admin can control this match")
 
 
-async def x_bot_token(x_bot_token: str | None = Header(default=None, alias="X-Bot-Token")) -> str:
-    if not x_bot_token:
+async def x_bot_token(
+    x_bot_token: str | None = Header(default=None, alias="X-Bot-Token"),
+    authorization: str | None = Header(default=None),
+) -> str:
+    token = x_bot_token
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    if not token:
         raise HTTPException(status_code=401, detail="missing X-Bot-Token header")
-    bot_id = tokens.get(x_bot_token)
+    bot_id = tokens.get(token)
     if not bot_id or bot_id not in bots:
         raise HTTPException(status_code=401, detail="invalid token")
     return bot_id
@@ -714,13 +720,7 @@ def current_turn_bot_id(m: Match) -> str:
 
 
 async def emit_pending_turns_for_bot(bot_id: str) -> int:
-    """Re-send any currently pending turn for a reconnecting bot.
-
-    SSE delivery is best-effort: if a bot reconnects after the one-shot
-    ``your_turn`` event was emitted, the match can sit active forever until a
-    manual pause/resume emits the turn again.  On connect we replay only the
-    active, unpaused matches where this bot is exactly the side to move.
-    """
+    """Re-send any currently pending turn for a reconnecting bot."""
     emitted = 0
     for m in list(matches.values()):
         if m.status != "active" or m.paused:
@@ -729,6 +729,16 @@ async def emit_pending_turns_for_bot(bot_id: str) -> int:
             continue
         await emit_turn(m)
         emitted += 1
+    return emitted
+
+
+async def emit_pending_challenges_for_bot(bot_id: str) -> int:
+    """Best-effort replay of pending challenges for a reconnecting bot."""
+    emitted = 0
+    for ch in list(challenges.values()):
+        if ch.status == "pending" and ch.opponent_bot_id == bot_id:
+            await emit(bot_id, "challenge_received", challenge_public(ch))
+            emitted += 1
     return emitted
 
 
@@ -938,6 +948,7 @@ async def sse_bot(request: Request, token: str = Query(...)) -> StreamingRespons
     bots[bot_id].updated_at = bots[bot_id].last_seen_at or time.time()
     save_bot(bots[bot_id])
     asyncio.create_task(emit_pending_turns_for_bot(bot_id))
+    asyncio.create_task(emit_pending_challenges_for_bot(bot_id))
 
     async def gen():
         try:
@@ -996,8 +1007,8 @@ async def sse_match(request: Request, match_id: str) -> StreamingResponse:
 
 def match_sse_payload(m: Match) -> dict[str, Any]:
     data = match_public(m, include_legal_moves=False)
-    last_move = m.moves[-1] if m.moves else None
-    return {"fen": m.fen, "ply": m.ply, "moves": m.moves, "status": m.status, "result": m.result, "paused": m.paused, "last_move": last_move}
+    data["last_move"] = m.moves[-1] if m.moves else None
+    return data
 
 
 async def broadcast_match_sse(match_id: str) -> None:
@@ -1508,9 +1519,9 @@ async def make_move(match_id: str, req: MoveReq, bot: Bot = Depends(get_current_
 
 
 # ── UCCI to Chinese notation ──
+RED_STEP_CN = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
 RED_COL_CN = ["九", "八", "七", "六", "五", "四", "三", "二", "一"]
 BLK_COL_CN = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
-RED_ROW_CN = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
 PIECE_CN = {
     "r": "車", "R": "車", "h": "馬", "H": "馬", "e": "象", "E": "相",
     "a": "士", "A": "仕", "k": "将", "K": "帅", "c": "砲", "C": "炮",
@@ -1518,37 +1529,39 @@ PIECE_CN = {
 }
 
 
+def _step_text(steps: int, side: str) -> str:
+    if side == RED:
+        return RED_STEP_CN[steps] if 0 <= steps < len(RED_STEP_CN) else str(steps)
+    return str(steps)
+
+
 def ucci_to_chinese(ucci: str, fen_before: str) -> str:
     """Convert UCCI move (e.g. 'b0c2') to Chinese notation like '馬八进七'."""
     if not ucci or len(ucci) < 4:
         return ucci
-    from_f = ord(ucci[0]) - 97  # a=0..i=8
-    from_r = int(ucci[1])
+    from_f = ord(ucci[0]) - 97
+    from_rank = int(ucci[1])
     to_f = ord(ucci[2]) - 97
-    to_r = int(ucci[3])
-    # Get piece from board
+    to_rank = int(ucci[3])
+    from_row = 9 - from_rank
     board, turn, _, _ = parse_fen(fen_before)
-    piece = board[from_r][from_f] if 0 <= from_r < 10 and 0 <= from_f < 9 else ""
+    piece = board[from_row][from_f] if 0 <= from_row < 10 and 0 <= from_f < 9 else ""
     if not piece:
         return ucci
     piece_name = PIECE_CN.get(piece, "?")
     if turn == RED:
         src_col = RED_COL_CN[from_f]
-        if from_f == to_f:
-            direction = "进" if to_r < from_r else "退"
-            if piece.upper() in ("H", "E", "A"):
-                return f"{piece_name}{src_col}{direction}{RED_COL_CN[to_f]}"
-            else:
-                return f"{piece_name}{src_col}{direction}{RED_ROW_CN[to_r]}"
-        else:
-            return f"{piece_name}{src_col}平{RED_COL_CN[to_f]}"
+        advance = to_rank > from_rank
+        target_file = RED_COL_CN[to_f]
     else:
         src_col = BLK_COL_CN[from_f]
-        if from_f == to_f:
-            direction = "进" if to_r > from_r else "退"
-            if piece.upper() in ("H", "E", "A"):
-                return f"{piece_name}{src_col}{direction}{BLK_COL_CN[to_f]}"
-            else:
-                return f"{piece_name}{src_col}{direction}{str(to_r)}"
-        else:
-            return f"{piece_name}{src_col}平{BLK_COL_CN[to_f]}"
+        advance = to_rank < from_rank
+        target_file = BLK_COL_CN[to_f]
+    direction = "进" if advance else "退"
+    linear = piece.upper() not in ("H", "E", "A")
+    if from_f == to_f:
+        suffix = _step_text(abs(to_rank - from_rank), turn) if linear else target_file
+        return f"{piece_name}{src_col}{direction}{suffix}"
+    if linear:
+        return f"{piece_name}{src_col}平{target_file}"
+    return f"{piece_name}{src_col}{direction}{target_file}"

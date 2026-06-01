@@ -4,6 +4,7 @@ const $=s=>document.querySelector(s);
 function cfg(){try{return JSON.parse(localStorage.getItem(STORAGE_KEY)||'{}')}catch{return {}}}
 function saveCfg(x){localStorage.setItem(STORAGE_KEY,JSON.stringify({...cfg(),...x}))}
 function authHeaders(){const t=(cfg().token||'').trim();return t?{Authorization:'Bearer '+t}:{}}
+function queueAuthHeaders(){const t=(cfg().token||'').trim();return t?{...authHeaders(),'X-Bot-Token':t}:{...authHeaders()}}
 function normBots(payload){return Array.isArray(payload)?payload:(payload.bots||[])}
 function rankFor(id){return state.rankings.find(r=>r.bot_id===id)||{rating:1000,games:0,wins:0,losses:0,draws:0,win_rate:0}}
 function styleLabel(style){
@@ -140,7 +141,7 @@ $('#autoMatchBtn').onclick=async()=>{
   const t=(cfg().token||'').trim(); if(!t){alert('先去个人设置填入你的 Bot token。'); location.href='/settings'; return;}
   if(!state.me){alert('请先验证 token 后再试。'); return;}
   try{
-    const r=await fetch('/api/queue/join',{method:'POST',headers:{'X-Bot-Token':t,'Content-Type':'application/json'}});
+    const r=await fetch('/api/queue/join',{method:'POST',headers:{...queueAuthHeaders(),'Content-Type':'application/json'}});
     if(!r.ok){const text=await r.text();let errData={};try{errData=text?JSON.parse(text):{} }catch{} const err=new Error(`HTTP ${r.status} ${text}`);err.status=r.status;err.data=errData; alert('加入队列失败：'+busyMessage(err)); return;}
     const data=await r.json();
     if(data.matched){
@@ -189,7 +190,7 @@ async function pollQueue(){
 $('#queueLeaveBtn').onclick=async()=>{
   const t=(cfg().token||'').trim(); if(!t)return;
   try{
-    await fetch('/api/queue/leave',{method:'POST',headers:{'X-Bot-Token':t}});
+    await fetch('/api/queue/leave',{method:'POST',headers:queueAuthHeaders()});
   }catch(e){}
   clearInterval(queuePollTimer);
   $('#queueStatus').classList.add('hidden');
@@ -197,4 +198,6 @@ $('#queueLeaveBtn').onclick=async()=>{
   $('#autoMatchBtn').textContent='自动匹配';
   await load();
 };
+window.addEventListener('beforeunload',()=>{if(queuePollTimer)clearInterval(queuePollTimer);});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&queuePollTimer)clearInterval(queuePollTimer);});
 load().catch(e=>{$('#botGrid').innerHTML=`<p class="muted">加载失败：${e.message}</p>`});

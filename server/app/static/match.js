@@ -134,9 +134,9 @@ function updateStatusFromSSE(status,result,ply,paused){
     $('#turnBanner').textContent='⏸ 对局已暂停';
   }
 }
-function updateTurnBanner(ply,paused){
+function updateTurnBanner(ply,paused,turn){
   if(paused){$('#turnBanner').textContent='⏸ 对局已暂停'; return;}
-  const turn=ply%2===0?'red':'black';
+  turn=turn||(ply%2===0?'red':'black');
   $('#turnBanner').textContent=`轮到${turn==='red'?'红方':'黑方'}：${turn==='red'?cachedRedName:cachedBlackName}`;
 }
 async function stopMatch(){
@@ -207,7 +207,7 @@ function connectSSE(){
           if(d.ply!=null&&d.status==='active'){
             try{
               matchPaused=!!d.paused;
-              updateTurnBanner(d.ply,matchPaused);
+              updateTurnBanner(d.ply,matchPaused,d.turn);
             }catch(turnErr){console.error('turn render error',turnErr)}
           }
           // Audio is optional; it must not break board updates.
@@ -240,12 +240,13 @@ setTimeout(() => { if (typeof createAudioToggles === 'function') createAudioTogg
 setTimeout(()=>connectSSE(),500);
 // Fallback polling (every 5s, only if SSE hasn't updated recently)
 let lastSseUpdate=Date.now();
-setInterval(()=>{if(!isReplayLocked()&&Date.now()-lastSseUpdate>10000){load().catch(()=>{})}},5000);
+let fallbackPollTimer=setInterval(()=>{if(!document.hidden&&!isReplayLocked()&&Date.now()-lastSseUpdate>10000){load().catch(()=>{})}},5000);
+window.addEventListener('beforeunload',()=>{if(fallbackPollTimer)clearInterval(fallbackPollTimer);});
 
 // ═══════════════════════════════════════════
 // ── Replay Controller ──
 // ═══════════════════════════════════════════
-const INITIAL_FEN='rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1';
+const INITIAL_FEN='rheakaehr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RHEAKAEHR r - - 0 1';
 let fenHistory=[];      // FEN at each step: [initialFEN, afterMove1FEN, ..., afterMoveNFEN]
 let replayStep=-1;      // -1 = initial position, 0..N-1 = after move N
 let replayPlaying=false;
@@ -292,21 +293,26 @@ function applyUcciMove(fen,ucci){
   // ucci like "h2e2": from file_h=7 rank_2 to file_e=4 rank_2
   const parts=fen.split(' ');
   const board=parseFenBoard(fen);
-  const turn=parts[1]||'w';
+  const turn=parts[1]||'r';
   const fromFile=ucci.charCodeAt(0)-97; // a=0..i=8
   const fromRank=parseInt(ucci[1]);
   const toFile=ucci.charCodeAt(2)-97;
   const toRank=parseInt(ucci[3]);
-  const piece=board[fromRank][fromFile];
+  const fromRow=9-fromRank;
+  const toRow=9-toRank;
+  const piece=board[fromRow][fromFile];
   if(!piece||piece==='')return fen; // safety
   // Check if there's a piece at target (capture)
-  const captured=board[toRank][toFile];
-  board[fromRank][fromFile]='';
-  board[toRank][toFile]=piece;
-  const newTurn=turn==='w'?'b':'w';
+  const captured=board[toRow][toFile];
+  board[fromRow][fromFile]='';
+  board[toRow][toFile]=piece;
+  const newTurn=turn==='r'?'b':'r';
   return boardToFenRow(board)+' '+newTurn+' - - 0 1';
 }
 function buildFenHistory(moves,startFen){
+  if(moves&&moves.length&&moves[0].fen_before&&moves.every(m=>m.fen_after)){
+    return [moves[0].fen_before].concat(moves.map(m=>m.fen_after));
+  }
   const history=[startFen];
   let fen=startFen;
   for(const mv of moves){
@@ -542,52 +548,39 @@ function usesFileTarget(piece){
   const t=piece.toUpperCase();
   return t==='H'||t==='E'||t==='A'; // horse, elephant, advisor
 }
-function ucciToChinese(ucci,side,fensBefore){
-  // fensBefore: FEN before this move
+function stepText(n,side){
+  const RED_STEP=['','一','二','三','四','五','六','七','八','九','十'];
+  if(side==='red')return RED_STEP[n]||String(n);
+  return String(n);
+}
+function targetFileText(file,side){return side==='red'?RED_COL[file]:BLK_COL[file];}
+function ucciToChinese(ucci,side,fenBefore){
   if(!ucci||ucci.length<4)return ucci;
   const fromF=ucci.charCodeAt(0)-97;
-  const fromR=parseInt(ucci[1]);
+  const fromRank=parseInt(ucci[1],10);
   const toF=ucci.charCodeAt(2)-97;
-  const toR=parseInt(ucci[3]);
-  // Get piece from board
+  const toRank=parseInt(ucci[3],10);
+  const fromRow=9-fromRank;
   let piece='';
-  try{
-    const board=parseFenBoard(fensBefore);
-    piece=board[fromR][fromF]||'';
-  }catch(e){}
-  const pieceName=PIECE_CN[piece]||(piece===piece.toUpperCase()?'兵':'卒');
-  if(side==='red'){
-    const srcCol=RED_COL[fromF];
-    if(fromF===toF){
-      // Vertical move
-      const dir=toR<fromR?'进':'退';
-      if(usesFileTarget(piece)){
-        return pieceName+srcCol+dir+RED_COL[toF];
-      }else{
-        return pieceName+srcCol+dir+RED_ROW[toR];
-      }
-    }else{
-      return pieceName+srcCol+'平'+RED_COL[toF];
-    }
-  }else{
-    const srcCol=BLK_COL[fromF];
-    if(fromF===toF){
-      const dir=toR>fromR?'进':'退';
-      if(usesFileTarget(piece)){
-        return pieceName+srcCol+dir+BLK_COL[toF];
-      }else{
-        return pieceName+srcCol+dir+BLK_ROW[toR];
-      }
-    }else{
-      return pieceName+srcCol+'平'+BLK_COL[toF];
-    }
+  try{const board=parseFenBoard(fenBefore);piece=board[fromRow][fromF]||'';}catch(e){}
+  const pieceName=PIECE_CN[piece]||(side==='red'?'兵':'卒');
+  const srcCol=side==='red'?RED_COL[fromF]:BLK_COL[fromF];
+  const upper=(piece||'').toUpperCase();
+  const linear=!['H','E','A'].includes(upper);
+  const isAdvance=side==='red'?toRank>fromRank:toRank<fromRank;
+  if(fromF===toF){
+    return pieceName+srcCol+(isAdvance?'进':'退')+(linear?stepText(Math.abs(toRank-fromRank),side):targetFileText(toF,side));
   }
+  if(linear){
+    return pieceName+srcCol+'平'+targetFileText(toF,side);
+  }
+  return pieceName+srcCol+(isAdvance?'进':'退')+targetFileText(toF,side);
 }
 function buildUcciText(moves,fensBefore){
   let lines=[];
   moves.forEach(function(mv,i){
     const fen=fensBefore&&i<fensBefore.length?fensBefore[i]:null;
-    const cn=fen?ucciToChinese(mv.move,mv.side,fen):'';
+    const cn=mv.chinese_notation||(fen?ucciToChinese(mv.move,mv.side,fen):'');
     lines.push('#'+mv.ply+' '+mv.move+' ['+(mv.side==='red'?'红':'黑')+']'+(cn?' '+cn:'')+(mv.captured?' 吃'+mv.captured:''));
   });
   return lines.join('\n');
@@ -596,7 +589,7 @@ function buildChineseText(moves,fensBefore){
   let lines=[];
   moves.forEach(function(mv,i){
     const fen=fensBefore&&i<fensBefore.length?fensBefore[i]:null;
-    const cn=fen?ucciToChinese(mv.move,mv.side,fen):mv.move;
+    const cn=mv.chinese_notation||(fen?ucciToChinese(mv.move,mv.side,fen):mv.move);
     const prefix=(mv.ply%2===1)?((Math.floor(mv.ply/2)+1)+'. '):'   ';
     lines.push(prefix+cn);
   });

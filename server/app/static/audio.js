@@ -398,9 +398,11 @@ function speakChinese(text) {
 }
 
 // ── High-level helpers ──
-function announceMove(ucci, side, captured, isCheck) {
+function announceMove(moveOrUcci, side, captured, isCheck) {
   if (!captured && !isCheck) return;
-  const cn = ucciToChinese(ucci, side);
+  const mv = (moveOrUcci && typeof moveOrUcci === 'object') ? moveOrUcci : null;
+  const ucci = mv ? mv.move : moveOrUcci;
+  const cn = (mv && mv.chinese_notation) || ucciToChinese(ucci, side);
   const sideName = side === 'red' ? '红方' : '黑方';
   let text = sideName + cn;
   if (captured && isCheck) text += '，吃子并将军';
@@ -409,7 +411,7 @@ function announceMove(ucci, side, captured, isCheck) {
   speakChinese(text);
 }
 
-function onMoveEvent(moveUcci, side, captured, isCheck) {
+function onMoveEvent(moveUcci, side, captured, isCheck, moveObj) {
   if (captured) {
     SoundFX.capture();
   } else {
@@ -418,7 +420,7 @@ function onMoveEvent(moveUcci, side, captured, isCheck) {
   if (isCheck) {
     setTimeout(() => SoundFX.check(), 250);
   }
-  announceMove(moveUcci, side, captured, isCheck);
+  announceMove(moveObj || moveUcci, side, captured, isCheck);
 }
 
 function speakBotSpeech(move, onDone) {
@@ -575,7 +577,7 @@ function handleSSEAudio(d) {
         const mv = d.moves[i];
         if (mv && mv.move) {
           const isCheck = mv.check === true || detectCheckFromComment(mv.comment);
-          onMoveEvent(mv.move, mv.side, mv.captured, isCheck);
+          onMoveEvent(mv.move, mv.side, mv.captured, isCheck, mv);
         }
       }
       lastPly = newPly;
