@@ -84,7 +84,7 @@ async function api(path,opts={}){
 }
 function show(el,data){$(el).textContent=typeof data==='string'?data:JSON.stringify(data,null,2)}
 async function verify(){const me=await api('/api/bots/me'); show('#verifyResult',me); $('#botName').value=me.name||''; $('#avatarUrl').value=me.avatar_url||''; $('#description').value=me.description||''; $('#chessStyle').value=me.chess_style||'random'; $('#personaPrompt').value=me.persona_prompt||''; saveSettings({arenaBase:base(),token:token(),...me}); return me}
-function collect(){return {name:$('#botName').value.trim(),avatar_url:$('#avatarUrl').value.trim(),description:$('#description').value.trim(),chess_style:$('#chessStyle').value,persona_prompt:$('#personaPrompt').value.trim(),engine_mode:$('#chessStyle').value,is_public:true}}
+function collect(){return {name:$('#botName').value.trim(),avatar_url:$('#avatarUrl').value.trim(),description:$('#description').value.trim(),chess_style:$('#chessStyle').value,persona_prompt:$('#personaPrompt').value.trim(),is_public:true}}
 function speakPreview(){
   if(!window.speechSynthesis){show('#verifyResult','当前浏览器不支持语音合成');return;}
   const text='这局我先记下了，下一手你可要小心。';

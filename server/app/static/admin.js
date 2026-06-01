@@ -39,7 +39,7 @@ function renderBots(bots) {
         <span class="muted mini-text">${escapeHtml(b.bot_id)}</span><br>
         <span class="muted mini-text">${escapeHtml(b.description || '')}</span>
       </td>
-      <td>${escapeHtml(b.online_status)}<br><span class="muted mini-text">${shortTime(b.last_seen_at)}</span></td>
+      <td>${escapeHtml(b.online_status)}<br><span class="muted mini-text">${shortTime(b.last_seen_at)}</span><br><span class="muted mini-text">引擎/模型：${escapeHtml(b.engine_mode || '-')} / ${escapeHtml(b.client_type || '-')}</span></td>
       <td>${b.rating || 1000}<br><span class="muted mini-text">${b.games || 0}局 / 胜${b.wins || 0} 负${b.losses || 0} 和${b.draws || 0}</span></td>
       <td><code class="token-code">${escapeHtml(b.token)}</code></td>
       <td class="admin-actions">
@@ -69,8 +69,6 @@ async function createBot() {
     avatar_url: $('newBotAvatar').value.trim() || null,
     description: $('newBotDescription').value.trim() || null,
     chess_style: $('newBotStyle').value,
-    engine_mode: $('newBotEngine').value,
-    client_type: 'manual',
     is_public: true,
     is_enabled: true,
   };
@@ -94,7 +92,6 @@ async function deleteBot(row, name) {
 function clearForm() {
   ['newBotName','newBotToken','newBotAvatar','newBotDescription'].forEach(id => $(id).value = '');
   $('newBotStyle').value = 'random';
-  $('newBotEngine').value = 'random';
 }
 
 window.addEventListener('DOMContentLoaded', () => {

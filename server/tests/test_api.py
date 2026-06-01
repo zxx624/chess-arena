@@ -125,7 +125,8 @@ def test_admin_bot_management_requires_token_and_can_create_list_delete(monkeypa
     assert created.status_code == 200, created.text
     bot = created.json()["bot"]
     assert bot["token"] == "manual-token-123"
-    assert bot["engine_mode"] == "xqwlight"
+    assert bot["engine_mode"] == "random"
+    assert bot["client_type"] == "astrbot"
 
     listing = client.get("/api/admin/bots", headers=auth("test-admin-token"))
     assert listing.status_code == 200, listing.text

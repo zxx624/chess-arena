@@ -34,24 +34,17 @@
         <label class="field"><span>自定义 Token（可留空）</span><input id="newBotToken" placeholder="留空自动生成"></label>
         <label class="field"><span>头像 URL</span><input id="newBotAvatar" placeholder="可留空"></label>
         <label class="field"><span>简介</span><textarea id="newBotDescription" rows="3" placeholder="可留空"></textarea></label>
-        <div class="two-fields">
-          <label class="field"><span>棋风</span>
-            <select id="newBotStyle">
-              <option value="random">random</option>
-              <option value="aggressive">aggressive</option>
-              <option value="steady">steady</option>
-              <option value="defensive">defensive</option>
-              <option value="greedy">greedy</option>
-              <option value="showman">showman</option>
-            </select>
-          </label>
-          <label class="field"><span>引擎</span>
-            <select id="newBotEngine">
-              <option value="random">random</option>
-              <option value="xqwlight">xqwlight</option>
-            </select>
-          </label>
-        </div>
+        <label class="field"><span>棋风</span>
+          <select id="newBotStyle">
+            <option value="random">random</option>
+            <option value="aggressive">aggressive</option>
+            <option value="steady">steady</option>
+            <option value="defensive">defensive</option>
+            <option value="greedy">greedy</option>
+            <option value="showman">showman</option>
+          </select>
+        </label>
+        <p class="muted mini-text">引擎和模型由 AstrBot 插件端控制，网页端只显示当前状态。</p>
         <div class="actions">
           <button type="submit" id="createBotBtn" class="btn primary">新增棋手</button>
           <button type="button" id="clearNewBot" class="btn ghost">清空</button>

@@ -121,9 +121,6 @@ class BotUpdateReq(BaseModel):
     description: str | None = None
     chess_style: str | None = None
     persona_prompt: str | None = None
-    engine_mode: str | None = None
-    client_type: str | None = None
-    instance_name: str | None = None
     is_public: bool | None = None
     is_enabled: bool | None = None
 
@@ -151,9 +148,6 @@ class AdminBotCreateReq(BaseModel):
     description: str | None = None
     chess_style: str = "random"
     persona_prompt: str | None = None
-    engine_mode: str = "random"
-    client_type: str = "manual"
-    instance_name: str | None = None
     is_public: bool = True
     is_enabled: bool = True
 
@@ -1160,8 +1154,8 @@ async def api_admin_create_bot(req: AdminBotCreateReq, _: None = Depends(require
         bot = Bot(
             id=new_id("bot"), name=req.name, token=token, created_at=now, updated_at=now,
             avatar_url=req.avatar_url, description=req.description, chess_style=req.chess_style or "random",
-            persona_prompt=req.persona_prompt, engine_mode=req.engine_mode or "random", client_type=req.client_type or "manual",
-            instance_name=req.instance_name, is_public=req.is_public, is_enabled=req.is_enabled,
+            persona_prompt=req.persona_prompt, engine_mode="random", client_type="astrbot",
+            instance_name=None, is_public=req.is_public, is_enabled=req.is_enabled,
         )
         bots[bot.id] = bot
         tokens[bot.token] = bot.id
