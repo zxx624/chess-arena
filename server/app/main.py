@@ -754,7 +754,7 @@ async def get_rankings(limit: int = Query(50, ge=1, le=200), offset: int = Query
     with db_connect() as conn:
         total = conn.execute("SELECT COUNT(*) AS c FROM rankings r JOIN bots b ON b.id = r.bot_id WHERE b.is_public = 1 AND b.is_enabled = 1").fetchone()["c"]
         rows = conn.execute(
-            """SELECT r.*, b.name, b.avatar_url FROM rankings r JOIN bots b ON b.id = r.bot_id
+            """SELECT r.*, b.name, b.avatar_url, b.online_status FROM rankings r JOIN bots b ON b.id = r.bot_id
                WHERE b.is_public = 1 AND b.is_enabled = 1
                ORDER BY r.rating DESC, r.wins DESC, r.games ASC, b.name ASC LIMIT ? OFFSET ?""",
             (limit, offset),
@@ -762,7 +762,7 @@ async def get_rankings(limit: int = Query(50, ge=1, le=200), offset: int = Query
     rankings = []
     for i, row in enumerate(rows, start=offset + 1):
         rankings.append({
-            "rank": i, "bot_id": row["bot_id"], "name": row["name"], "avatar_url": row["avatar_url"] or "",
+            "rank": i, "bot_id": row["bot_id"], "name": row["name"], "avatar_url": row["avatar_url"] or "", "online_status": row["online_status"] or "offline",
             "rating": row["rating"], "games": row["games"], "wins": row["wins"], "losses": row["losses"],
             "draws": row["draws"], "win_rate": row["win_rate"], "streak": row["streak"],
         })
@@ -1336,25 +1336,35 @@ async def admin_stop_all(_: None = Depends(require_admin)) -> dict[str, Any]:
 
 @app.post("/api/analyze")
 async def analyze(req: AnalyzeReq, bot_id: str = Depends(x_bot_token)) -> dict[str, Any]:
-    """Proxy analyze request to the xqwlight engine server."""
+    """Proxy analyze request to the server-side xqwlight engine."""
     try:
         import aiohttp
     except ImportError as exc:
         raise HTTPException(status_code=503, detail="aiohttp dependency is not installed") from exc
 
+    started = time.perf_counter()
+    depth = max(1, min(int(req.depth or 3), 8))
     try:
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(
                 "http://127.0.0.1:8789/analyze",
-                json={"fen": req.fen, "depth": req.depth},
+                json={"fen": req.fen, "depth": depth},
             ) as resp:
                 text = await resp.text()
                 if resp.status >= 400:
                     raise HTTPException(status_code=502, detail=f"engine error: {text[:200]}")
-                return json.loads(text)
+                data = json.loads(text)
+                if not isinstance(data, dict):
+                    raise HTTPException(status_code=502, detail="engine error: invalid response")
+                data.setdefault("engine", "server_xqwlight")
+                data.setdefault("depth", depth)
+                data["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+                return data
     except aiohttp.ClientError as exc:
         raise HTTPException(status_code=502, detail=f"engine unreachable: {exc}")
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"engine error: {exc}")
 

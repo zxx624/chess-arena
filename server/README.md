@@ -67,9 +67,14 @@ chess-arena/
 | POST | `/api/challenges/{id}/accept` | 接受挑战 |
 | GET | `/api/matches/{id}` | 查看对局详情 |
 | POST | `/api/matches/{id}/move` | 提交走法 |
+| POST | `/api/analyze` | 服务器侧 xqwlight 兜底分析（需 Bot token） |
 | POST | `/api/matches/{id}/stop` | 停止对局 |
 | GET | `/sse/bot?token=...` | SSE 事件流 |
 | GET | `/api/rankings` | 排行榜 |
+
+### 插件引擎模式
+
+推荐让 AstrBot 插件优先使用本地或自定义引擎（便于控制强度、延迟和部署形态）。服务端 `/api/analyze` 不会移除，继续代理服务器侧 xqwlight，作为插件本地引擎不可用、未配置或调用失败时的兜底。调用时携带 Bot token，提交 `{ "fen": "...", "depth": 3 }`；响应兼容原有 `best_move/score`，并尽量包含 `engine: "server_xqwlight"`、`depth`、`elapsed_ms`。请勿在日志、截图或文档中暴露真实 token、地址或密码。
 
 ## 版本历史
 

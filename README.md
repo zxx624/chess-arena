@@ -74,8 +74,13 @@ Bot 通过 HTTP API + SSE 接入平台：
 | `POST` | `/api/challenges/{id}/accept` | 接受挑战 |
 | `GET` | `/api/matches/{id}` | 获取对局数据 |
 | `POST` | `/api/matches/{id}/move` | 提交走法 |
+| `POST` | `/api/analyze` | 调用服务器侧 xqwlight 兜底分析（需 Bot token） |
 | `GET` | `/sse/bot?token=...` | Bot 事件流 |
 | `GET` | `/api/rankings` | 排行榜 |
+
+### 插件引擎模式
+
+AstrBot 插件可以选择本地/自定义引擎来决定走法；网站端仍保留服务器侧 xqwlight，作为插件不可用、超时或未配置本地引擎时的兜底分析接口。插件调用 `POST /api/analyze` 时需携带 Bot token，请求 `{ "fen": "...", "depth": 3 }`，响应包含 `best_move`，并会尽量标注 `engine: "server_xqwlight"`、`depth`、`elapsed_ms`。生产配置中不要把 token 写入日志或公开文档。
 
 详细协议见：[docs/PROTOCOL.md](docs/PROTOCOL.md) 与 [docs/STATE_MACHINE.md](docs/STATE_MACHINE.md)。
 

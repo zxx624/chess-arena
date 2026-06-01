@@ -12,6 +12,18 @@ function saveAudioCfg(c) {
 let sfxEnabled = true;
 let voiceEnabled = true;
 let botSpeechVoiceEnabled = true;
+let botSpeechVoiceURI = '';
+let botSpeechRate = 0.95;
+let botSpeechPitch = 1.0;
+const BUILTIN_BOT_SPEECH_VOICES = [
+  { id: 'preset:zh-cn-female-soft', lang: 'zh-CN', rate: 0.95, pitch: 1.08 },
+  { id: 'preset:zh-cn-female-bright', lang: 'zh-CN', rate: 1.08, pitch: 1.18 },
+  { id: 'preset:zh-cn-male-calm', lang: 'zh-CN', rate: 0.9, pitch: 0.86 },
+  { id: 'preset:zh-cn-male-deep', lang: 'zh-CN', rate: 0.82, pitch: 0.72 },
+  { id: 'preset:zh-cn-child', lang: 'zh-CN', rate: 1.15, pitch: 1.45 },
+  { id: 'preset:zh-tw', lang: 'zh-TW', rate: 0.95, pitch: 1.03 },
+  { id: 'preset:zh-hk', lang: 'zh-HK', rate: 0.95, pitch: 0.98 }
+];
 
 (function initAudioCfg() {
   const c = audioCfg();
@@ -20,10 +32,19 @@ let botSpeechVoiceEnabled = true;
   if (c.voice !== undefined) voiceEnabled = c.voice;
   else if (c.voiceEnabled !== undefined) voiceEnabled = c.voiceEnabled;
   if (c.botSpeechVoice !== undefined) botSpeechVoiceEnabled = c.botSpeechVoice;
+  botSpeechVoiceURI = c.botSpeechVoiceURI || c.botSpeechVoiceName || '';
+  botSpeechRate = clampSpeechNumber(c.botSpeechRate, 0.5, 1.5, 0.95);
+  botSpeechPitch = clampSpeechNumber(c.botSpeechPitch, 0.5, 2, 1.0);
 })();
 
+function clampSpeechNumber(v, min, max, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
 function persistAudioCfg() {
-  saveAudioCfg({ sfx: sfxEnabled, voice: voiceEnabled, botSpeechVoice: botSpeechVoiceEnabled });
+  saveAudioCfg({ sfx: sfxEnabled, voice: voiceEnabled, botSpeechVoice: botSpeechVoiceEnabled, botSpeechVoiceURI, botSpeechRate, botSpeechPitch });
 }
 
 // ── Web Audio Engine ──
@@ -295,12 +316,25 @@ if (window.speechSynthesis) {
   window.speechSynthesis.onvoiceschanged = refreshChineseVoices;
 }
 
-function pickChineseVoice() {
+function findBuiltinBotVoice(id) {
+  return BUILTIN_BOT_SPEECH_VOICES.find(v => v.id === id) || null;
+}
+
+function pickChineseVoice(preferConfigured) {
   const voices = chineseVoices.length ? chineseVoices : refreshChineseVoices();
   if (!voices.length) return null;
+  if (preferConfigured && botSpeechVoiceURI) {
+    const direct = voices.find(v => v.voiceURI === botSpeechVoiceURI || v.name === botSpeechVoiceURI);
+    if (direct) return direct;
+    const preset = findBuiltinBotVoice(botSpeechVoiceURI);
+    if (preset) {
+      const byLang = voices.find(v => (v.lang || '').toLowerCase() === preset.lang.toLowerCase());
+      if (byLang) return byLang;
+    }
+  }
   const zhCn = voices.filter(v => /^zh(-|_)CN/i.test(v.lang || ''));
   const pool = zhCn.length ? zhCn : voices;
-  return pool[Math.floor(Math.random() * pool.length)] || null;
+  return pool[0] || null;
 }
 
 function randomPitch() {
@@ -313,11 +347,12 @@ function speakText(text, opts) {
     return;
   }
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = 'zh-CN';
-  utterance.rate = opts && opts.rate ? opts.rate : 0.9;
-  utterance.pitch = opts && opts.pitch ? opts.pitch : randomPitch();
+  const preset = opts && opts.preferConfiguredVoice ? findBuiltinBotVoice(botSpeechVoiceURI) : null;
+  utterance.lang = preset ? preset.lang : 'zh-CN';
+  utterance.rate = clampSpeechNumber((opts && opts.rate ? opts.rate : 0.9) * (preset ? preset.rate : 1), 0.3, 2, 0.9);
+  utterance.pitch = clampSpeechNumber((opts && opts.pitch ? opts.pitch : 1.0) * (preset ? preset.pitch : 1), 0.1, 2, 1.0);
   utterance.volume = 0.9;
-  const voice = pickChineseVoice();
+  const voice = pickChineseVoice(opts && opts.preferConfiguredVoice);
   if (voice) utterance.voice = voice;
   let done = false;
   const finish = () => {
@@ -391,8 +426,8 @@ function speakBotSpeech(move, onDone) {
     if (typeof onDone === 'function') onDone();
     return;
   }
-  window.speechSynthesis.cancel();
-  speakText(move.bot_speech, { rate: 0.95, onend: onDone });
+  // Do not cancel move/capture speech here; cancelling is what made TTS flaky during fast games.
+  speakText(move.bot_speech, { rate: botSpeechRate, pitch: botSpeechPitch, preferConfiguredVoice: true, onend: onDone });
 }
 
 function onGameEnd(result) {
@@ -498,18 +533,19 @@ function markAudioStateLoaded(ply) {
 }
 
 function playBotSpeechBeforeRender(d, renderFn) {
-  if (!d) {
-    renderFn();
-    return;
-  }
+  // Compatibility wrapper: render immediately, then speak. Do not block board updates on TTS.
+  renderFn();
+  playBotSpeechAfterRender(d);
+}
+
+function playBotSpeechAfterRender(d) {
+  if (!d) return;
   const ply = Number(d.ply || (d.moves ? d.moves.length : 0));
   const last = d.last_move || (d.moves && d.moves[d.moves.length - 1]);
   if (ply > lastBotSpeechPly && last && last.bot_speech && botSpeechVoiceEnabled) {
     lastBotSpeechPly = ply;
-    speakBotSpeech(last, renderFn);
-    return;
+    speakBotSpeech(last);
   }
-  renderFn();
 }
 
 // Call this when new SSE match_state arrives

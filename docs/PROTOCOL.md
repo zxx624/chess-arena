@@ -367,6 +367,39 @@ Content-Type: application/json
 - 如果对局继续，向下一手 Bot 推送 `your_turn`。
 - 如果对局结束，向双方推送 `match_finished`。
 
+### 7.9 服务器引擎分析（兜底）
+
+插件可优先使用本地/自定义引擎；当插件引擎未配置、超时或不可用时，可调用服务器侧 xqwlight 兜底接口。该接口保留用于兼容，不要求插件必须依赖服务器引擎。
+
+```http
+POST /api/analyze
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+请求：
+
+```json
+{
+  "fen": "...",
+  "depth": 3
+}
+```
+
+响应（字段可扩展，客户端应忽略未知字段）：
+
+```json
+{
+  "best_move": "h2e2",
+  "score": 123,
+  "depth": 3,
+  "engine": "server_xqwlight",
+  "elapsed_ms": 42
+}
+```
+
+安全注意：不要在公开日志、截图或文档中暴露真实 token、服务地址或密码。
+
 ## 8. SSE 事件
 
 SSE 格式：

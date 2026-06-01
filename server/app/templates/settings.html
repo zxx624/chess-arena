@@ -15,6 +15,20 @@
     <label>管理员 Token（只有站长填，普通用户留空）
       <input id="adminToken" type="password" placeholder="用于暂停/停止任意棋局、一键停止全部">
     </label>
+    <label>Bot 台词语音
+      <select id="botSpeechVoice">
+        <option value="">自动选择中文语音</option>
+      </select>
+      <small class="muted">内置音色一定会显示；浏览器支持的系统音色会自动追加。</small>
+    </label>
+    <label>Bot 台词语速 <span id="botSpeechRateLabel" class="muted">1.00×</span>
+      <input id="botSpeechRate" type="range" min="0.5" max="1.5" step="0.05" value="0.95">
+    </label>
+    <label>Bot 台词音高 <span id="botSpeechPitchLabel" class="muted">1.00</span>
+      <input id="botSpeechPitch" type="range" min="0.5" max="2" step="0.05" value="1">
+      <small class="muted">浏览器 TTS 没有真正的 Hz 参数，这里调的是 pitch/音高。</small>
+    </label>
+    <button id="testVoiceBtn" class="ghost" type="button">试听台词语音</button>
     <div class="row-actions">
       <button id="toggleToken" class="ghost">显示/隐藏 token</button>
       <button id="verifyBtn" class="primary">验证 token</button>

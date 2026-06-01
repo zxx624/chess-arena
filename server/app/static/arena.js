@@ -31,6 +31,20 @@ function renderAvatar(el,name,avatarUrl,cls){
     el.textContent=(name||'?').slice(0,1);
   }
 }
+
+function escapeHtml(v){return String(v??'').replace(/[&<>\"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[ch]))}
+function matchResultInfo(m){
+  const status=(m.status||'').toLowerCase();
+  const result=(m.result||'').toLowerCase();
+  const winnerSide=m.winner_bot_id===m.red_bot_id?'red':m.winner_bot_id===m.black_bot_id?'black':'';
+  if(status==='active')return {label:'进行中',cls:'live',action:'观战',winnerSide:''};
+  if(status==='pending')return {label:'等待中',cls:'pending',action:'查看',winnerSide:''};
+  if(result==='draw')return {label:'和棋',cls:'draw',action:'回顾',winnerSide:''};
+  if(result==='red_win')return {label:'已结束',cls:'red',action:'回顾',winnerSide:'red'};
+  if(result==='black_win')return {label:'已结束',cls:'black',action:'回顾',winnerSide:'black'};
+  return {label:status==='finished'?'已结束':(m.status||'未知'),cls:'done',action:status==='finished'?'回顾':'查看',winnerSide};
+}
+
 async function json(url,opts={}){const r=await fetch(url,opts);const text=await r.text();let data;try{data=text?JSON.parse(text):{}}catch{data={raw:text}}if(!r.ok)throw new Error(`HTTP ${r.status} ${text}`);return data}
 async function loadMe(){const t=(cfg().token||'').trim(); if(!t){state.me=null; $('#myBotName').textContent='未设置'; $('#myBotId').textContent=''; return}
   try{const me=await json('/api/bots/me',{headers:authHeaders()}); state.me=me; saveCfg({...me}); $('#myBotName').textContent=me.name||me.bot_id; $('#myBotId').textContent=' · '+me.bot_id}
@@ -68,8 +82,50 @@ async function challenge(opponent){
   waitMatch(ch.challenge_id);
 }
 async function waitMatch(challengeId){for(let i=0;i<40;i++){const data=await json('/api/admin/matches?limit=20'); const m=(data.matches||[]).find(x=>x.challenge_id===challengeId); if(m){location.href='/matches/'+m.match_id;return} await new Promise(r=>setTimeout(r,1000))} alert('已发出挑战，但暂未生成对局。对手插件可能没在线或没自动接挑战。')}
-function renderRankings(){const ol=$('#rankingList');ol.innerHTML='';state.rankings.slice(0,8).forEach((r,i)=>{const li=document.createElement('li');li.className='ranking-item';const av=document.createElement('span');renderAvatar(av,r.name,r.avatar_url,'ranking-avatar');li.appendChild(av);const info=document.createElement('span');info.className='ranking-info';info.textContent=`${i+1}. ${r.name} · ${r.rating}`;li.appendChild(info);ol.appendChild(li)}); if(!state.rankings.length)ol.innerHTML='<li class="muted">暂无排行</li>'}
-function renderMatches(ms){const box=$('#matchList');box.innerHTML='';if(!ms.length){box.innerHTML='<p class="muted">暂无对局</p>';return}ms.slice(0,8).forEach(m=>{const a=document.createElement('a');a.href=`/matches/${m.match_id}`;let result='';if(m.result==='red_win')result='红胜';else if(m.result==='black_win')result='黑胜';else if(m.result==='draw')result='和棋';else if(m.status==='active')result='进行中';else result=m.status;a.innerHTML=`<b>${m.red_bot_name}</b> vs <b>${m.black_bot_name}</b><span class="muted"> · ${result}</span>`;box.appendChild(a)})}
+function renderRankings(){
+  const ol=$('#rankingList');ol.innerHTML='';
+  const list=state.rankings;
+  if(!list.length){ol.innerHTML='<li class="muted">暂无排行</li>';return}
+  list.forEach((r,i)=>{
+    const li=document.createElement('li');li.className='ranking-item';
+    const wrap=document.createElement('span');wrap.className='ranking-avatar-wrap';
+    const av=document.createElement('span');renderAvatar(av,r.name,r.avatar_url,'ranking-avatar');
+    const dot=document.createElement('span');dot.className='online-dot '+(r.online_status==='online'?'is-online':'is-offline');dot.title=r.online_status==='online'?'在线':'离线';dot.textContent=r.online_status==='online'?'✓':'×';
+    wrap.appendChild(av);wrap.appendChild(dot);li.appendChild(wrap);
+    const info=document.createElement('span');info.className='ranking-info';
+    info.innerHTML=`<b><span>${r.rank||i+1}. ${escapeHtml(r.name||r.bot_id)}</span><strong>${r.rating}</strong></b><small>${r.games||0}局 · ${Math.round((r.win_rate||0)*100)}%</small>`;
+    li.appendChild(info);ol.appendChild(li)
+  })
+}
+function recentAvatarHtml(name,url,side,isWinner){
+  const initial=escapeHtml((name||'?').slice(0,1));
+  const bg=avatarGradient(name||side);
+  const img=url?`<img class="recent-avatar-img" src="${escapeHtml(url)}" alt="${escapeHtml(name||side)}" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex'"><span class="recent-avatar-fallback" style="display:none;background:${bg}">${initial}</span>`:`<span class="recent-avatar-fallback" style="background:${bg}">${initial}</span>`;
+  return `<span class="recent-avatar-wrap ${side} ${isWinner?'winner':''}">${img}${isWinner?'<span class="winner-mark">胜</span>':''}</span>`;
+}
+function renderMatches(ms){
+  const box=$('#matchList');box.innerHTML='';
+  if(!ms.length){box.innerHTML='<p class="muted">暂无对局</p>';return}
+  ms.forEach(m=>{
+    const row=document.createElement('button');row.type='button';row.className='match-row recent-match-card';
+    const info=matchResultInfo(m);
+    const ply=m.ply ?? m.move_count ?? 0;
+    row.innerHTML=`<span class="recent-vs">${recentAvatarHtml(m.red_bot_name||'红方',m.red_bot_avatar_url,'red',info.winnerSide==='red')}<em>VS</em>${recentAvatarHtml(m.black_bot_name||'黑方',m.black_bot_avatar_url,'black',info.winnerSide==='black')}</span><span class="recent-match-main"><b>${escapeHtml(m.red_bot_name||'红方')} <em>vs</em> ${escapeHtml(m.black_bot_name||'黑方')}</b><small>${ply}手</small></span><span class="match-meta"><span class="result-pill ${info.cls}">${info.label}</span></span>`;
+    row.onclick=()=>showMatchPreview(m,info);
+    box.appendChild(row)
+  })
+}
+function showMatchPreview(m,info){
+  let modal=$('#matchPreviewModal');
+  if(!modal){modal=document.createElement('div');modal.id='matchPreviewModal';modal.className='match-preview-modal';document.body.appendChild(modal);}
+  const ply=m.ply ?? m.move_count ?? 0;
+  const redWin=info.winnerSide==='red', blackWin=info.winnerSide==='black';
+  modal.innerHTML=`<div class="match-preview-backdrop"></div><section class="match-preview-card panel"><button class="match-preview-close" aria-label="关闭">×</button><p class="eyebrow">对局详情</p><h2>${escapeHtml(info.label)} · ${ply}手</h2><div class="match-preview-players"><div class="preview-player ${redWin?'winner':''}">${recentAvatarHtml(m.red_bot_name||'红方',m.red_bot_avatar_url,'red',redWin)}<b>${escapeHtml(m.red_bot_name||'红方')}</b><small>红方${redWin?' · 胜者':''}</small></div><strong>VS</strong><div class="preview-player ${blackWin?'winner':''}">${recentAvatarHtml(m.black_bot_name||'黑方',m.black_bot_avatar_url,'black',blackWin)}<b>${escapeHtml(m.black_bot_name||'黑方')}</b><small>黑方${blackWin?' · 胜者':''}</small></div></div><div class="preview-detail-grid"><span>状态</span><b>${escapeHtml(info.label)}</b><span>手数</span><b>${ply}</b><span>结束原因</span><b>${escapeHtml(m.finish_reason||'-')}</b><span>对局ID</span><b>${escapeHtml(m.match_id)}</b></div><a class="button primary preview-action" href="/matches/${m.match_id}">${info.action}</a></section>`;
+  modal.classList.add('active');
+  modal.querySelector('.match-preview-close').onclick=()=>modal.classList.remove('active');
+  modal.querySelector('.match-preview-backdrop').onclick=()=>modal.classList.remove('active');
+}
+
 $('#search').addEventListener('input',renderBots);$('#onlineOnly').addEventListener('change',renderBots);$('#refreshBtn').onclick=load;
 $('#randomBtn').onclick=()=>{const pool=state.bots.filter(b=>(!state.me||b.bot_id!==state.me.bot_id)&&(!$('#onlineOnly').checked||b.online_status==='online'));if(!pool.length)return;const b=pool[Math.floor(Math.random()*pool.length)];state.selected=b.bot_id;$('#pickedHint').textContent=`随机选中：${b.name}`;renderBots()};
 
