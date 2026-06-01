@@ -593,6 +593,42 @@ def admin_match_summary(m: Match) -> dict[str, Any]:
     return summary
 
 
+def active_match_for_bot(bot_id: str) -> Match | None:
+    for m in matches.values():
+        if m.status == "active" and bot_id in (m.red_bot_id, m.black_bot_id):
+            return m
+    return None
+
+
+def ensure_bot_available(bot_id: str) -> None:
+    m = active_match_for_bot(bot_id)
+    if not m:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "bot_busy",
+            "message": "bot is already in an active match",
+            "bot_id": bot_id,
+            "match_id": m.id,
+        },
+    )
+
+
+def remove_bot_from_queue(bot_id: str) -> None:
+    match_queue_entries.pop(bot_id, None)
+    with db_connect() as conn:
+        conn.execute("DELETE FROM match_queue WHERE bot_id = ?", (bot_id,))
+
+
+def create_match_from_challenge(ch: Challenge) -> Match:
+    ensure_bot_available(ch.challenger_bot_id)
+    ensure_bot_available(ch.opponent_bot_id)
+    red_id = ch.challenger_bot_id if ch.challenger_side == RED else ch.opponent_bot_id
+    black_id = ch.opponent_bot_id if ch.challenger_side == RED else ch.challenger_bot_id
+    return Match(id=new_id("match"), red_bot_id=red_id, black_bot_id=black_id, challenge_id=ch.id)
+
+
 def fmt_ts(ts: float | None) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts or 0))
 
@@ -985,6 +1021,7 @@ async def broadcast_match_sse(match_id: str) -> None:
 @app.post("/api/queue/join")
 async def queue_join(request: Request, bot_id: str = Depends(x_bot_token)) -> dict[str, Any]:
     async with state_lock:
+        ensure_bot_available(bot_id)
         # Reject if already in queue
         if bot_id in match_queue_entries:
             raise HTTPException(status_code=400, detail="already in queue")
@@ -1006,6 +1043,9 @@ async def queue_join(request: Request, bot_id: str = Depends(x_bot_token)) -> di
         matched_rating: int | None = None
         for other_id, entry in list(match_queue_entries.items()):
             if other_id == bot_id:
+                continue
+            if active_match_for_bot(other_id):
+                remove_bot_from_queue(other_id)
                 continue
             other_rating = entry.get("rating", 1000)
             if abs(rating - other_rating) <= 200:
@@ -1031,9 +1071,7 @@ async def queue_join(request: Request, bot_id: str = Depends(x_bot_token)) -> di
             save_challenge(ch)
 
             # Auto-accept: create match immediately
-            red_id = ch.challenger_bot_id if ch.challenger_side == RED else ch.opponent_bot_id
-            black_id = ch.opponent_bot_id if ch.challenger_side == RED else ch.challenger_bot_id
-            m = Match(id=new_id("match"), red_bot_id=red_id, black_bot_id=black_id, challenge_id=ch.id)
+            m = create_match_from_challenge(ch)
             matches[m.id] = m
             ch.status = "accepted"
             ch.match_id = m.id
@@ -1094,6 +1132,8 @@ async def create_challenge(req: ChallengeReq, bot: Bot = Depends(get_current_bot
             raise HTTPException(status_code=404, detail="opponent bot not found")
         if req.opponent_bot_id == bot.id:
             raise HTTPException(status_code=400, detail="cannot challenge self")
+        ensure_bot_available(bot.id)
+        ensure_bot_available(req.opponent_bot_id)
         ch = Challenge(id=new_id("ch"), challenger_bot_id=bot.id, opponent_bot_id=req.opponent_bot_id, challenger_side=choose_challenger_side(req.side))
         challenges[ch.id] = ch
         save_challenge(ch)
@@ -1112,9 +1152,7 @@ async def accept_challenge(challenge_id: str, bot: Bot = Depends(get_current_bot
             raise HTTPException(status_code=403, detail="only challenged bot can accept")
         if ch.status != "pending":
             raise HTTPException(status_code=400, detail="challenge not pending")
-        red_id = ch.challenger_bot_id if ch.challenger_side == RED else ch.opponent_bot_id
-        black_id = ch.opponent_bot_id if ch.challenger_side == RED else ch.challenger_bot_id
-        m = Match(id=new_id("match"), red_bot_id=red_id, black_bot_id=black_id, challenge_id=ch.id)
+        m = create_match_from_challenge(ch)
         matches[m.id] = m
         ch.status = "accepted"
         ch.match_id = m.id

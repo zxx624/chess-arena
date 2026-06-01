@@ -244,8 +244,10 @@ def test_match_control_permissions_and_admin_stop_all(monkeypatch):
     assert client.post(f"/api/matches/{match_id}/pause", headers=auth(a["token"])).status_code == 200
 
     # Create another active match, then admin stop all active games.
-    ch2 = client.post("/api/challenges", headers=auth(a["token"]), json={"opponent_bot_id": b["bot_id"], "side": "black"}).json()
-    accepted2 = client.post(f"/api/challenges/{ch2['challenge_id']}/accept", headers=auth(b["token"])).json()
+    c = client.post("/api/bots/register", json={"name": "owner-c"}).json()
+    d = client.post("/api/bots/register", json={"name": "owner-d"}).json()
+    ch2 = client.post("/api/challenges", headers=auth(c["token"]), json={"opponent_bot_id": d["bot_id"], "side": "black"}).json()
+    accepted2 = client.post(f"/api/challenges/{ch2['challenge_id']}/accept", headers=auth(d["token"])).json()
     match_id2 = accepted2["match_id"]
 
     denied = client.post("/api/admin/matches/stop_all", headers=auth(a["token"]))
@@ -256,3 +258,46 @@ def test_match_control_permissions_and_admin_stop_all(monkeypatch):
     assert stopped.json()["stopped"] >= 2
     assert client.get(f"/api/admin/matches/{match_id}").json()["status"] == "finished"
     assert client.get(f"/api/admin/matches/{match_id2}").json()["finish_reason"] == "stopped_all_by_admin"
+
+
+def test_busy_bot_cannot_create_accept_or_join_queue(monkeypatch):
+    monkeypatch.setattr('app.main.ADMIN_TOKEN', 'test-admin-token')
+    reset_state()
+    client = TestClient(app)
+    a = client.post("/api/bots/register", json={"name": "busy-a"}).json()
+    b = client.post("/api/bots/register", json={"name": "busy-b"}).json()
+    c = client.post("/api/bots/register", json={"name": "busy-c"}).json()
+    d = client.post("/api/bots/register", json={"name": "busy-d"}).json()
+
+    ch = client.post("/api/challenges", headers=auth(a["token"]), json={"opponent_bot_id": b["bot_id"], "side": "red"}).json()
+    accepted = client.post(f"/api/challenges/{ch['challenge_id']}/accept", headers=auth(b["token"])).json()
+    match_id = accepted["match_id"]
+    assert accepted["match"]["status"] == "active"
+
+    busy_target = client.post("/api/challenges", headers=auth(c["token"]), json={"opponent_bot_id": a["bot_id"], "side": "red"})
+    assert busy_target.status_code == 409
+    assert busy_target.json()["detail"]["code"] == "bot_busy"
+    assert busy_target.json()["detail"]["match_id"] == match_id
+
+    busy_challenger = client.post("/api/challenges", headers=auth(a["token"]), json={"opponent_bot_id": c["bot_id"], "side": "red"})
+    assert busy_challenger.status_code == 409
+    assert busy_challenger.json()["detail"]["code"] == "bot_busy"
+
+    busy_queue = client.post("/api/queue/join", headers={"X-Bot-Token": a["token"]})
+    assert busy_queue.status_code == 409
+    assert busy_queue.json()["detail"]["code"] == "bot_busy"
+
+    pending = client.post("/api/challenges", headers=auth(c["token"]), json={"opponent_bot_id": d["bot_id"], "side": "red"}).json()
+    other = client.post("/api/bots/register", json={"name": "busy-other"}).json()
+    other_ch = client.post("/api/challenges", headers=auth(other["token"]), json={"opponent_bot_id": c["bot_id"], "side": "black"}).json()
+    other_accepted = client.post(f"/api/challenges/{other_ch['challenge_id']}/accept", headers=auth(c["token"])).json()
+    assert other_accepted["match"]["status"] == "active"
+
+    stale_accept = client.post(f"/api/challenges/{pending['challenge_id']}/accept", headers=auth(d["token"]))
+    assert stale_accept.status_code == 409
+    assert stale_accept.json()["detail"]["code"] == "bot_busy"
+
+    stopped = client.post(f"/api/matches/{match_id}/stop", headers=auth("test-admin-token"))
+    assert stopped.status_code == 200, stopped.text
+    after_stop = client.post("/api/challenges", headers=auth(a["token"]), json={"opponent_bot_id": d["bot_id"], "side": "red"})
+    assert after_stop.status_code == 200, after_stop.text

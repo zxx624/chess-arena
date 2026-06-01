@@ -45,7 +45,8 @@ function matchResultInfo(m){
   return {label:status==='finished'?'已结束':(m.status||'未知'),cls:'done',action:status==='finished'?'回顾':'查看',winnerSide};
 }
 
-async function json(url,opts={}){const r=await fetch(url,opts);const text=await r.text();let data;try{data=text?JSON.parse(text):{}}catch{data={raw:text}}if(!r.ok)throw new Error(`HTTP ${r.status} ${text}`);return data}
+async function json(url,opts={}){const r=await fetch(url,opts);const text=await r.text();let data;try{data=text?JSON.parse(text):{}}catch{data={raw:text}}if(!r.ok){const e=new Error(`HTTP ${r.status} ${text}`);e.status=r.status;e.data=data;throw e}return data}
+function busyMessage(err){const d=err?.data?.detail;if(err?.status===409&&d?.code==='bot_busy'){return `这个 Bot 正在对局中，稍后再挑战。${d.match_id?'可先去观战：'+d.match_id:''}`}return err?.message||String(err)}
 async function loadMe(){const t=(cfg().token||'').trim(); if(!t){state.me=null; $('#myBotName').textContent='未设置'; $('#myBotId').textContent=''; return}
   try{const me=await json('/api/bots/me',{headers:authHeaders()}); state.me=me; saveCfg({...me}); $('#myBotName').textContent=me.name||me.bot_id; $('#myBotId').textContent=' · '+me.bot_id}
   catch(e){state.me=null; $('#myBotName').textContent='token 无效'; $('#myBotId').textContent=' · 去个人设置修改'} }
@@ -77,9 +78,13 @@ async function challenge(opponent){
   if(!state.me){alert('先去个人设置填入你的 Bot token，并验证成功。'); location.href='/settings'; return}
   if(opponent.bot_id===state.me.bot_id){alert('不能挑战自己'); return}
   if(opponent.online_status!=='online' && !confirm('对手当前显示离线，可能不会响应。仍然挑战吗？')) return;
-  const ch=await json('/api/challenges',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},body:JSON.stringify({opponent_bot_id:opponent.bot_id,side:'random'})});
-  $('#pickedHint').textContent=`挑战已发送：${opponent.name}，等待自动接受...`;
-  waitMatch(ch.challenge_id);
+  try{
+    const ch=await json('/api/challenges',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},body:JSON.stringify({opponent_bot_id:opponent.bot_id,side:'random'})});
+    $('#pickedHint').textContent=`挑战已发送：${opponent.name}，等待自动接受...`;
+    waitMatch(ch.challenge_id);
+  }catch(e){
+    alert('挑战失败：'+busyMessage(e));
+  }
 }
 async function waitMatch(challengeId){for(let i=0;i<40;i++){const data=await json('/api/admin/matches?limit=20'); const m=(data.matches||[]).find(x=>x.challenge_id===challengeId); if(m){location.href='/matches/'+m.match_id;return} await new Promise(r=>setTimeout(r,1000))} alert('已发出挑战，但暂未生成对局。对手插件可能没在线或没自动接挑战。')}
 function renderRankings(){
@@ -136,7 +141,7 @@ $('#autoMatchBtn').onclick=async()=>{
   if(!state.me){alert('请先验证 token 后再试。'); return;}
   try{
     const r=await fetch('/api/queue/join',{method:'POST',headers:{'X-Bot-Token':t,'Content-Type':'application/json'}});
-    if(!r.ok){const text=await r.text(); alert('加入队列失败：'+text); return;}
+    if(!r.ok){const text=await r.text();let errData={};try{errData=text?JSON.parse(text):{} }catch{} const err=new Error(`HTTP ${r.status} ${text}`);err.status=r.status;err.data=errData; alert('加入队列失败：'+busyMessage(err)); return;}
     const data=await r.json();
     if(data.matched){
       $('#queueStatus').classList.add('hidden');
