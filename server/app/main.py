@@ -672,8 +672,32 @@ async def emit_match_started(m: Match) -> None:
     await emit_turn(m)
 
 
+def current_turn_bot_id(m: Match) -> str:
+    _, turn, _, _ = parse_fen(m.fen)
+    return m.red_bot_id if turn == RED else m.black_bot_id
+
+
+async def emit_pending_turns_for_bot(bot_id: str) -> int:
+    """Re-send any currently pending turn for a reconnecting bot.
+
+    SSE delivery is best-effort: if a bot reconnects after the one-shot
+    ``your_turn`` event was emitted, the match can sit active forever until a
+    manual pause/resume emits the turn again.  On connect we replay only the
+    active, unpaused matches where this bot is exactly the side to move.
+    """
+    emitted = 0
+    for m in list(matches.values()):
+        if m.status != "active" or m.paused:
+            continue
+        if current_turn_bot_id(m) != bot_id:
+            continue
+        await emit_turn(m)
+        emitted += 1
+    return emitted
+
+
 async def emit_turn(m: Match) -> None:
-    if m.status != "active":
+    if m.status != "active" or m.paused:
         return
     _, turn, _, _ = parse_fen(m.fen)
     bot_id = m.red_bot_id if turn == RED else m.black_bot_id
@@ -877,6 +901,7 @@ async def sse_bot(request: Request, token: str = Query(...)) -> StreamingRespons
     bots[bot_id].last_seen_at = time.time()
     bots[bot_id].updated_at = bots[bot_id].last_seen_at or time.time()
     save_bot(bots[bot_id])
+    asyncio.create_task(emit_pending_turns_for_bot(bot_id))
 
     async def gen():
         try:

@@ -232,6 +232,17 @@ def test_match_control_permissions_and_admin_stop_all(monkeypatch):
     assert admin_unpause.json()["admin"] is True
     assert admin_unpause.json()["paused"] is False
 
+    from app.main import emit_pending_turns_for_bot
+    import asyncio
+    emitted = asyncio.run(emit_pending_turns_for_bot(a["bot_id"]))
+    assert emitted == 1
+
+    paused_again = client.post(f"/api/matches/{match_id}/pause", headers=auth(a["token"]))
+    assert paused_again.status_code == 200, paused_again.text
+    emitted_paused = asyncio.run(emit_pending_turns_for_bot(a["bot_id"]))
+    assert emitted_paused == 0
+    assert client.post(f"/api/matches/{match_id}/pause", headers=auth(a["token"])).status_code == 200
+
     # Create another active match, then admin stop all active games.
     ch2 = client.post("/api/challenges", headers=auth(a["token"]), json={"opponent_bot_id": b["bot_id"], "side": "black"}).json()
     accepted2 = client.post(f"/api/challenges/{ch2['challenge_id']}/accept", headers=auth(b["token"])).json()
