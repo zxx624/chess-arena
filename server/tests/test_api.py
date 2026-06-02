@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.engine import legal_moves
 import app.main as main_module
-from app.main import app, bots, challenges, load_state_from_db, matches, Bot, save_bot
+from app.main import app, bots, challenges, load_state_from_db, matches, Bot, save_bot, save_match, update_rankings_for_finished_match
 
 
 def auth(token: str):
@@ -206,6 +206,46 @@ def test_v02_sse_sets_online_status_basic():
     listing = client.get("/api/bots", params={"online_only": True}).json()
     assert listing["total"] == 1
     assert listing["bots"][0]["online_status"] == "online"
+
+
+def test_admin_match_total_excludes_orphan_matches_from_deleted_bots(monkeypatch):
+    monkeypatch.setattr('app.main.ADMIN_TOKEN', 'test-admin-token')
+    reset_state()
+    client = TestClient(app)
+    a = client.post("/api/bots/register", json={"name": "visible-a"}).json()
+    b = client.post("/api/bots/register", json={"name": "visible-b"}).json()
+    c = client.post("/api/bots/register", json={"name": "visible-c"}).json()
+
+    ch1 = client.post("/api/challenges", headers=auth(a["token"]), json={"opponent_bot_id": b["bot_id"], "side": "red"}).json()
+    m1 = client.post(f"/api/challenges/{ch1['challenge_id']}/accept", headers=auth(b["token"])).json()["match_id"]
+    matches[m1].status = "finished"
+    matches[m1].result = "red_win"
+    matches[m1].winner_bot_id = a["bot_id"]
+    save_match(matches[m1])
+    update_rankings_for_finished_match(matches[m1])
+
+    ch2 = client.post("/api/challenges", headers=auth(a["token"]), json={"opponent_bot_id": c["bot_id"], "side": "red"}).json()
+    m2 = client.post(f"/api/challenges/{ch2['challenge_id']}/accept", headers=auth(c["token"])).json()["match_id"]
+    matches[m2].status = "finished"
+    matches[m2].result = "red_win"
+    matches[m2].winner_bot_id = a["bot_id"]
+    save_match(matches[m2])
+    update_rankings_for_finished_match(matches[m2])
+
+    before = client.get("/api/admin/matches?limit=20").json()
+    assert before["total"] == 2
+    assert sum(r["games"] for r in client.get("/api/rankings").json()["rankings"]) == 4
+
+    deleted = client.delete(f"/api/admin/bots/{b['bot_id']}", headers=auth("test-admin-token"))
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deleted_matches"] == 1
+
+    after = client.get("/api/admin/matches?limit=20").json()
+    assert after["total"] == 1
+    assert [m["match_id"] for m in after["matches"]] == [m2]
+    rankings = client.get("/api/rankings").json()["rankings"]
+    assert sum(r["games"] for r in rankings) == after["total"] * 2
+    assert {r["bot_id"]: r["games"] for r in rankings}[a["bot_id"]] == 1
 
 
 def test_match_control_permissions_and_admin_stop_all(monkeypatch):

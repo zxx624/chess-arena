@@ -333,9 +333,9 @@ def load_state_from_db() -> None:
                 paused=bool(row["paused"]),
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
-                red_time_left_ms=row["red_time_left_ms"] or 600_000,
-                black_time_left_ms=row["black_time_left_ms"] or 600_000,
-                total_time_ms=row["total_time_ms"] or 600_000,
+                red_time_left_ms=row["red_time_left_ms"] if row["red_time_left_ms"] is not None else 600_000,
+                black_time_left_ms=row["black_time_left_ms"] if row["black_time_left_ms"] is not None else 600_000,
+                total_time_ms=row["total_time_ms"] if row["total_time_ms"] is not None else 600_000,
                 last_move_at=row["last_move_at"],
                 started_at=row["started_at"],
                 finished_at=row["finished_at"],
@@ -537,6 +537,29 @@ def update_rankings_for_finished_match(m: Match) -> None:
             )
 
 
+def recompute_rankings_from_visible_matches() -> None:
+    """Rebuild rankings from matches whose two bots still exist.
+
+    Deleting a bot removes its games from the visible match universe, so every
+    remaining bot's game count/rating must be recalculated instead of keeping
+    stale counts from matches that no longer exist.
+    """
+    now = time.time()
+    with db_connect() as conn:
+        conn.execute("DELETE FROM rating_history")
+        conn.execute("DELETE FROM rankings")
+        conn.execute(
+            "INSERT INTO rankings(bot_id, rating, games, wins, losses, draws, win_rate, streak, updated_at) SELECT id, 1000, 0, 0, 0, 0, 0, 0, ? FROM bots",
+            (now,),
+        )
+    finished = sorted(
+        [m for m in visible_matches() if m.status == "finished" and m.result in {"red_win", "black_win", "draw"}],
+        key=lambda m: (m.finished_at or m.updated_at or m.created_at, m.created_at, m.id),
+    )
+    for m in finished:
+        update_rankings_for_finished_match(m)
+
+
 def challenge_public(ch: Challenge) -> dict[str, Any]:
     return {
         "challenge_id": ch.id,
@@ -591,6 +614,19 @@ def admin_match_summary(m: Match) -> dict[str, Any]:
     if m.winner_bot_id:
         summary["winner_bot_name"] = bot_name(m.winner_bot_id)
     return summary
+
+
+def match_has_known_bots(m: Match) -> bool:
+    return m.red_bot_id in bots and m.black_bot_id in bots
+
+
+def visible_matches() -> list[Match]:
+    """Matches shown in public/admin lists must have both participants still present.
+
+    If a bot was deleted directly from the database, old matches can become orphaned.
+    Those games should no longer contribute to homepage/recent-match totals.
+    """
+    return [m for m in matches.values() if match_has_known_bots(m)]
 
 
 def active_match_for_bot(bot_id: str) -> Match | None:
@@ -1196,7 +1232,8 @@ async def reject_challenge(challenge_id: str, bot: Bot = Depends(get_current_bot
 
 @app.get("/api/admin/matches")
 async def api_admin_matches(limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
-    ordered = sorted(matches.values(), key=lambda m: m.updated_at, reverse=True)
+    refresh_state_from_db()
+    ordered = sorted(visible_matches(), key=lambda m: m.updated_at, reverse=True)
     page = ordered[offset : offset + limit]
     return {"total": len(ordered), "limit": limit, "offset": offset, "matches": [admin_match_summary(m) for m in page]}
 
@@ -1256,13 +1293,16 @@ async def api_admin_delete_bot(bot_id: str, _: None = Depends(require_admin)) ->
         bots.pop(bot_id, None)
         tokens.pop(token, None)
         delete_bot_from_db(bot_id)
+        load_state_from_db()
+        recompute_rankings_from_visible_matches()
+        load_state_from_db()
     return {"deleted": True, "bot_id": bot_id, "deleted_matches": len(deleted_matches), "deleted_challenges": len(deleted_challenges)}
 
 
 @app.post("/api/admin/matches/backfill_rankings")
 async def backfill_rankings() -> dict[str, Any]:
     """Backfill rankings for all finished matches that haven't been scored yet."""
-    finished = [m for m in matches.values() if m.status == "finished" and m.result]
+    finished = [m for m in visible_matches() if m.status == "finished" and m.result]
     already = set()
     with db_connect() as conn:
         rows = conn.execute("SELECT DISTINCT match_id FROM rating_history").fetchall()
@@ -1283,13 +1323,15 @@ async def backfill_rankings() -> dict[str, Any]:
 
 @app.get("/", response_class=HTMLResponse)
 async def arena_home(request: Request) -> HTMLResponse:
-    recent_matches = sorted(matches.values(), key=lambda m: m.updated_at, reverse=True)[:20]
+    refresh_state_from_db()
+    recent_matches = sorted(visible_matches(), key=lambda m: m.updated_at, reverse=True)[:20]
     return templates.TemplateResponse(request, "arena.html", {"title": "ChessBot Arena 大厅", "recent_matches": recent_matches, "bot_name": bot_name})
 
 
 @app.get("/arena", response_class=HTMLResponse)
 async def arena_page(request: Request) -> HTMLResponse:
-    recent_matches = sorted(matches.values(), key=lambda m: m.updated_at, reverse=True)[:20]
+    refresh_state_from_db()
+    recent_matches = sorted(visible_matches(), key=lambda m: m.updated_at, reverse=True)[:20]
     return templates.TemplateResponse(request, "arena.html", {"title": "ChessBot Arena 大厅", "recent_matches": recent_matches, "bot_name": bot_name})
 
 
