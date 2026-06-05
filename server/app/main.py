@@ -56,6 +56,8 @@ class Bot:
     online_status: str = "offline"
     last_seen_at: float | None = None
     updated_at: float = field(default_factory=time.time)
+    challenge_policy: str = "auto_accept"
+    owner_review_timeout_sec: int = 180
 
 
 @dataclass
@@ -67,6 +69,10 @@ class Challenge:
     status: str = "pending"
     match_id: str | None = None
     created_at: float = field(default_factory=time.time)
+    owner_decision: str | None = None
+    owner_decision_reason: str | None = None
+    expires_at: float | None = None
+    updated_at: float = field(default_factory=time.time)
 
 
 @dataclass
@@ -102,6 +108,9 @@ match_sse_queues: dict[str, set[asyncio.Queue]] = {}
 match_queue_entries: dict[str, dict[str, Any]] = {}  # bot_id -> {bot_id, rating, joined_at}
 state_lock = asyncio.Lock()
 
+CHALLENGE_POLICIES = {"auto_accept", "manual_approve", "reject_all"}
+ACTIONABLE_CHALLENGE_STATUSES = {"pending", "owner_review"}
+
 
 class RegisterReq(BaseModel):
     name: str = Field(min_length=1, max_length=80)
@@ -113,6 +122,8 @@ class RegisterReq(BaseModel):
     client_type: str = "astrbot"
     instance_name: str | None = None
     is_public: bool = True
+    challenge_policy: str = "auto_accept"
+    owner_review_timeout_sec: int = 180
 
 
 class BotUpdateReq(BaseModel):
@@ -123,11 +134,18 @@ class BotUpdateReq(BaseModel):
     persona_prompt: str | None = None
     is_public: bool | None = None
     is_enabled: bool | None = None
+    challenge_policy: str | None = None
+    owner_review_timeout_sec: int | None = Field(default=None, ge=1, le=3600)
 
 
 class ChallengeReq(BaseModel):
     opponent_bot_id: str
     side: Side | None = None
+
+
+class OwnerDecisionReq(BaseModel):
+    decision: str
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class MoveReq(BaseModel):
@@ -150,6 +168,8 @@ class AdminBotCreateReq(BaseModel):
     persona_prompt: str | None = None
     is_public: bool = True
     is_enabled: bool = True
+    challenge_policy: str = "auto_accept"
+    owner_review_timeout_sec: int = 180
 
 
 def db_connect() -> sqlite3.Connection:
@@ -259,6 +279,14 @@ def init_db() -> None:
             "online_status": "TEXT DEFAULT 'offline'",
             "last_seen_at": "REAL",
             "updated_at": "REAL",
+            "challenge_policy": "TEXT DEFAULT 'auto_accept'",
+            "owner_review_timeout_sec": "INTEGER DEFAULT 180",
+        })
+        ensure_columns(conn, "challenges", {
+            "owner_decision": "TEXT",
+            "owner_decision_reason": "TEXT",
+            "expires_at": "REAL",
+            "updated_at": "REAL",
         })
         ensure_columns(conn, "matches", {
             "winner_bot_id": "TEXT",
@@ -273,6 +301,9 @@ def init_db() -> None:
         })
         now = time.time()
         conn.execute("UPDATE bots SET updated_at = COALESCE(updated_at, created_at, ?)", (now,))
+        conn.execute("UPDATE bots SET challenge_policy = COALESCE(NULLIF(challenge_policy, ''), 'auto_accept')")
+        conn.execute("UPDATE bots SET owner_review_timeout_sec = COALESCE(owner_review_timeout_sec, 180)")
+        conn.execute("UPDATE challenges SET updated_at = COALESCE(updated_at, created_at, ?)", (now,))
         conn.execute("INSERT OR IGNORE INTO rankings(bot_id, rating, games, wins, losses, draws, win_rate, streak, updated_at) SELECT id, 1000, 0, 0, 0, 0, 0, 0, ? FROM bots", (now,))
 
 
@@ -300,6 +331,8 @@ def load_state_from_db() -> None:
                 is_public=bool(row["is_public"]), is_enabled=bool(row["is_enabled"]),
                 online_status=row["online_status"] or "offline", last_seen_at=row["last_seen_at"],
                 updated_at=row["updated_at"] or row["created_at"],
+                challenge_policy=row["challenge_policy"] if row["challenge_policy"] in CHALLENGE_POLICIES else "auto_accept",
+                owner_review_timeout_sec=int(row["owner_review_timeout_sec"] or 180),
             )
             bots[bot.id] = bot
             tokens[bot.token] = bot.id
@@ -312,6 +345,10 @@ def load_state_from_db() -> None:
                 status=row["status"],
                 match_id=row["match_id"],
                 created_at=row["created_at"],
+                owner_decision=row["owner_decision"],
+                owner_decision_reason=row["owner_decision_reason"],
+                expires_at=row["expires_at"],
+                updated_at=row["updated_at"] or row["created_at"],
             )
         for row in conn.execute("SELECT * FROM matches"):
             try:
@@ -352,14 +389,15 @@ def load_state_from_db() -> None:
 def save_bot(bot: Bot) -> None:
     with db_connect() as conn:
         conn.execute(
-            """INSERT INTO bots(id, name, token, created_at, avatar_url, description, chess_style, persona_prompt, engine_mode, client_type, instance_name, is_public, is_enabled, online_status, last_seen_at, updated_at)
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO bots(id, name, token, created_at, avatar_url, description, chess_style, persona_prompt, engine_mode, client_type, instance_name, is_public, is_enabled, online_status, last_seen_at, updated_at, challenge_policy, owner_review_timeout_sec)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET name=excluded.name, token=excluded.token, created_at=excluded.created_at,
                  avatar_url=excluded.avatar_url, description=excluded.description, chess_style=excluded.chess_style,
                  persona_prompt=excluded.persona_prompt, engine_mode=excluded.engine_mode, client_type=excluded.client_type,
                  instance_name=excluded.instance_name, is_public=excluded.is_public, is_enabled=excluded.is_enabled,
-                 online_status=excluded.online_status, last_seen_at=excluded.last_seen_at, updated_at=excluded.updated_at""",
-            (bot.id, bot.name, bot.token, bot.created_at, bot.avatar_url, bot.description, bot.chess_style, bot.persona_prompt, bot.engine_mode, bot.client_type, bot.instance_name, int(bot.is_public), int(bot.is_enabled), bot.online_status, bot.last_seen_at, bot.updated_at),
+                 online_status=excluded.online_status, last_seen_at=excluded.last_seen_at, updated_at=excluded.updated_at,
+                 challenge_policy=excluded.challenge_policy, owner_review_timeout_sec=excluded.owner_review_timeout_sec""",
+            (bot.id, bot.name, bot.token, bot.created_at, bot.avatar_url, bot.description, bot.chess_style, bot.persona_prompt, bot.engine_mode, bot.client_type, bot.instance_name, int(bot.is_public), int(bot.is_enabled), bot.online_status, bot.last_seen_at, bot.updated_at, bot.challenge_policy, bot.owner_review_timeout_sec),
         )
         conn.execute("INSERT OR IGNORE INTO rankings(bot_id, rating, games, wins, losses, draws, win_rate, streak, updated_at) VALUES(?, 1000, 0, 0, 0, 0, 0, 0, ?)", (bot.id, time.time()))
 
@@ -367,16 +405,20 @@ def save_bot(bot: Bot) -> None:
 def save_challenge(ch: Challenge) -> None:
     with db_connect() as conn:
         conn.execute(
-            """INSERT INTO challenges(id, challenger_bot_id, opponent_bot_id, challenger_side, status, match_id, created_at)
-               VALUES(?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO challenges(id, challenger_bot_id, opponent_bot_id, challenger_side, status, match_id, created_at, owner_decision, owner_decision_reason, expires_at, updated_at)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  challenger_bot_id=excluded.challenger_bot_id,
                  opponent_bot_id=excluded.opponent_bot_id,
                  challenger_side=excluded.challenger_side,
                  status=excluded.status,
                  match_id=excluded.match_id,
-                 created_at=excluded.created_at""",
-            (ch.id, ch.challenger_bot_id, ch.opponent_bot_id, ch.challenger_side, ch.status, ch.match_id, ch.created_at),
+                 created_at=excluded.created_at,
+                 owner_decision=excluded.owner_decision,
+                 owner_decision_reason=excluded.owner_decision_reason,
+                 expires_at=excluded.expires_at,
+                 updated_at=excluded.updated_at""",
+            (ch.id, ch.challenger_bot_id, ch.opponent_bot_id, ch.challenger_side, ch.status, ch.match_id, ch.created_at, ch.owner_decision, ch.owner_decision_reason, ch.expires_at, ch.updated_at),
         )
 
 
@@ -454,6 +496,8 @@ def bot_public(bot: Bot) -> dict[str, Any]:
         "last_seen_at": bot.last_seen_at,
         "created_at": bot.created_at,
         "updated_at": bot.updated_at,
+        "challenge_policy": bot.challenge_policy,
+        "owner_review_timeout_sec": bot.owner_review_timeout_sec,
     }
 
 
@@ -564,11 +608,18 @@ def challenge_public(ch: Challenge) -> dict[str, Any]:
     return {
         "challenge_id": ch.id,
         "challenger_bot_id": ch.challenger_bot_id,
+        "challenger_name": bot_name(ch.challenger_bot_id),
         "opponent_bot_id": ch.opponent_bot_id,
+        "opponent_name": bot_name(ch.opponent_bot_id),
         "challenger_side": ch.challenger_side,
         "status": ch.status,
         "match_id": ch.match_id,
+        "owner_decision": ch.owner_decision,
+        "owner_decision_reason": ch.owner_decision_reason,
+        "requires_owner_decision": ch.status == "owner_review",
         "created_at": ch.created_at,
+        "updated_at": ch.updated_at,
+        "expires_at": ch.expires_at,
     }
 
 
@@ -663,6 +714,48 @@ def create_match_from_challenge(ch: Challenge) -> Match:
     red_id = ch.challenger_bot_id if ch.challenger_side == RED else ch.opponent_bot_id
     black_id = ch.opponent_bot_id if ch.challenger_side == RED else ch.challenger_bot_id
     return Match(id=new_id("match"), red_bot_id=red_id, black_bot_id=black_id, challenge_id=ch.id)
+
+
+def challenge_is_actionable(ch: Challenge) -> bool:
+    return ch.status in ACTIONABLE_CHALLENGE_STATUSES
+
+
+def challenge_received_payload(ch: Challenge) -> dict[str, Any]:
+    return {
+        **challenge_public(ch),
+        "type": "challenge_received",
+        "requires_owner_decision": ch.status == "owner_review",
+    }
+
+
+def owner_decision_response(ch: Challenge, m: Match | None = None) -> dict[str, Any]:
+    data: dict[str, Any] = {"challenge": challenge_public(ch), "match": match_public(m) if m else None}
+    if m:
+        data["match_id"] = m.id
+        data["match_url"] = match_url(m)
+    return data
+
+
+def match_url(m: Match) -> str:
+    base_url = os.environ.get("CHESS_ARENA_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    path = f"/matches/{m.id}"
+    return f"{base_url}{path}" if base_url else path
+
+
+def accept_challenge_locked(ch: Challenge, owner_decision: str | None = None, owner_decision_reason: str | None = None) -> Match:
+    m = create_match_from_challenge(ch)
+    matches[m.id] = m
+    now = time.time()
+    ch.status = "accepted"
+    ch.match_id = m.id
+    if owner_decision is not None:
+        ch.owner_decision = owner_decision
+    if owner_decision_reason is not None:
+        ch.owner_decision_reason = owner_decision_reason
+    ch.updated_at = now
+    save_challenge(ch)
+    save_match(m)
+    return m
 
 
 def fmt_ts(ts: float | None) -> str:
@@ -772,8 +865,8 @@ async def emit_pending_challenges_for_bot(bot_id: str) -> int:
     """Best-effort replay of pending challenges for a reconnecting bot."""
     emitted = 0
     for ch in list(challenges.values()):
-        if ch.status == "pending" and ch.opponent_bot_id == bot_id:
-            await emit(bot_id, "challenge_received", challenge_public(ch))
+        if challenge_is_actionable(ch) and ch.opponent_bot_id == bot_id:
+            await emit(bot_id, "challenge_received", challenge_received_payload(ch))
             emitted += 1
     return emitted
 
@@ -792,6 +885,12 @@ def choose_challenger_side(side: Side | None) -> str:
     return side.value
 
 
+def validate_challenge_policy(policy: str) -> str:
+    if policy not in CHALLENGE_POLICIES:
+        raise HTTPException(status_code=400, detail="invalid challenge_policy")
+    return policy
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -799,13 +898,15 @@ async def health() -> dict[str, str]:
 
 @app.post("/api/bots/register")
 async def register(req: RegisterReq) -> dict[str, Any]:
+    policy = validate_challenge_policy(req.challenge_policy)
     async with state_lock:
         now = time.time()
         bot = Bot(
             id=new_id("bot"), name=req.name, token=secrets.token_urlsafe(32), created_at=now, updated_at=now,
             avatar_url=req.avatar_url, description=req.description, chess_style=req.chess_style or "random",
             persona_prompt=req.persona_prompt, engine_mode=req.engine_mode or "random", client_type=req.client_type or "astrbot",
-            instance_name=req.instance_name, is_public=req.is_public,
+            instance_name=req.instance_name, is_public=req.is_public, challenge_policy=policy,
+            owner_review_timeout_sec=req.owner_review_timeout_sec,
         )
         bots[bot.id] = bot
         tokens[bot.token] = bot.id
@@ -822,6 +923,8 @@ async def me(bot: Bot = Depends(get_current_bot)) -> dict[str, Any]:
 async def update_me(req: BotUpdateReq, bot: Bot = Depends(get_current_bot)) -> dict[str, Any]:
     async with state_lock:
         updates = req.model_dump(exclude_unset=True)
+        if "challenge_policy" in updates and updates["challenge_policy"] is not None:
+            updates["challenge_policy"] = validate_challenge_policy(updates["challenge_policy"])
         for key, value in updates.items():
             setattr(bot, key, value)
         bot.updated_at = time.time()
@@ -1181,12 +1284,85 @@ async def create_challenge(req: ChallengeReq, bot: Bot = Depends(get_current_bot
             raise HTTPException(status_code=400, detail="cannot challenge self")
         ensure_bot_available(bot.id)
         ensure_bot_available(req.opponent_bot_id)
-        ch = Challenge(id=new_id("ch"), challenger_bot_id=bot.id, opponent_bot_id=req.opponent_bot_id, challenger_side=choose_challenger_side(req.side))
+        opponent = bots[req.opponent_bot_id]
+        now = time.time()
+        ch = Challenge(
+            id=new_id("ch"),
+            challenger_bot_id=bot.id,
+            opponent_bot_id=req.opponent_bot_id,
+            challenger_side=choose_challenger_side(req.side),
+            updated_at=now,
+        )
+        if opponent.challenge_policy == "manual_approve":
+            ch.status = "owner_review"
+            ch.expires_at = now + max(1, int(opponent.owner_review_timeout_sec or 180))
+        elif opponent.challenge_policy == "reject_all":
+            ch.status = "rejected"
+            ch.owner_decision = "reject"
+            ch.owner_decision_reason = "opponent policy reject_all"
         challenges[ch.id] = ch
         save_challenge(ch)
         data = challenge_public(ch)
-    await emit(req.opponent_bot_id, "challenge_received", data)
+    if ch.status == "rejected":
+        await emit(ch.challenger_bot_id, "challenge_rejected", {"message": "challenge rejected", "challenge": data})
+    else:
+        await emit(req.opponent_bot_id, "challenge_received", challenge_received_payload(ch))
     return data
+
+
+@app.get("/api/bots/me/challenges/pending")
+async def pending_challenges(bot: Bot = Depends(get_current_bot)) -> dict[str, Any]:
+    rows = [
+        challenge_public(ch)
+        for ch in challenges.values()
+        if ch.opponent_bot_id == bot.id and challenge_is_actionable(ch)
+    ]
+    rows.sort(key=lambda ch: ch.get("created_at") or 0, reverse=True)
+    return {"total": len(rows), "challenges": rows}
+
+
+@app.post("/api/challenges/{challenge_id}/owner_decision")
+async def owner_decision(challenge_id: str, req: OwnerDecisionReq, bot: Bot = Depends(get_current_bot)) -> dict[str, Any]:
+    decision = (req.decision or "").strip().lower()
+    if decision not in {"accept", "reject"}:
+        raise HTTPException(status_code=400, detail="decision must be accept or reject")
+    async with state_lock:
+        ch = challenges.get(challenge_id)
+        if not ch:
+            raise HTTPException(status_code=404, detail="challenge not found")
+        if ch.opponent_bot_id != bot.id:
+            raise HTTPException(status_code=403, detail="only challenged bot can decide")
+        if not challenge_is_actionable(ch):
+            raise HTTPException(status_code=400, detail="challenge not actionable")
+        now = time.time()
+        if ch.status == "owner_review" and ch.expires_at and ch.expires_at < now:
+            ch.status = "expired"
+            ch.updated_at = now
+            save_challenge(ch)
+            raise HTTPException(status_code=400, detail="challenge expired")
+        if decision == "accept":
+            m = accept_challenge_locked(ch, owner_decision="accept", owner_decision_reason=req.reason)
+            ch_data = challenge_public(ch)
+            m_data = match_public(m)
+            response = owner_decision_response(ch, m)
+        else:
+            ch.status = "rejected"
+            ch.owner_decision = "reject"
+            ch.owner_decision_reason = req.reason
+            ch.updated_at = now
+            save_challenge(ch)
+            ch_data = challenge_public(ch)
+            m = None
+            m_data = None
+            response = owner_decision_response(ch, None)
+    if decision == "accept" and m:
+        await emit(ch.challenger_bot_id, "challenge_accepted", {**ch_data, "match": m_data, "match_url": match_url(m)})
+        await emit(ch.opponent_bot_id, "challenge_accepted", {**ch_data, "match": m_data, "match_url": match_url(m)})
+        await emit_match_started(m)
+    else:
+        await emit(ch.challenger_bot_id, "challenge_rejected", {"message": "challenge rejected", "challenge": ch_data})
+        await emit(ch.challenger_bot_id, "error", {"message": "challenge rejected", "challenge": ch_data})
+    return response
 
 
 @app.post("/api/challenges/{challenge_id}/accept")
@@ -1197,20 +1373,15 @@ async def accept_challenge(challenge_id: str, bot: Bot = Depends(get_current_bot
             raise HTTPException(status_code=404, detail="challenge not found")
         if ch.opponent_bot_id != bot.id:
             raise HTTPException(status_code=403, detail="only challenged bot can accept")
-        if ch.status != "pending":
-            raise HTTPException(status_code=400, detail="challenge not pending")
-        m = create_match_from_challenge(ch)
-        matches[m.id] = m
-        ch.status = "accepted"
-        ch.match_id = m.id
-        save_challenge(ch)
-        save_match(m)
+        if not challenge_is_actionable(ch):
+            raise HTTPException(status_code=400, detail="challenge not actionable")
+        m = accept_challenge_locked(ch)
         ch_data = challenge_public(ch)
         m_data = match_public(m)
-    await emit(ch.challenger_bot_id, "challenge_accepted", {**ch_data, "match": m_data})
-    await emit(ch.opponent_bot_id, "challenge_accepted", {**ch_data, "match": m_data})
+    await emit(ch.challenger_bot_id, "challenge_accepted", {**ch_data, "match": m_data, "match_url": match_url(m)})
+    await emit(ch.opponent_bot_id, "challenge_accepted", {**ch_data, "match": m_data, "match_url": match_url(m)})
     await emit_match_started(m)
-    return {**ch_data, "match": m_data}
+    return {**ch_data, "match": m_data, "match_url": match_url(m)}
 
 
 @app.post("/api/challenges/{challenge_id}/reject")
@@ -1221,11 +1392,14 @@ async def reject_challenge(challenge_id: str, bot: Bot = Depends(get_current_bot
             raise HTTPException(status_code=404, detail="challenge not found")
         if ch.opponent_bot_id != bot.id:
             raise HTTPException(status_code=403, detail="only challenged bot can reject")
-        if ch.status != "pending":
-            raise HTTPException(status_code=400, detail="challenge not pending")
+        if not challenge_is_actionable(ch):
+            raise HTTPException(status_code=400, detail="challenge not actionable")
         ch.status = "rejected"
+        ch.owner_decision = ch.owner_decision or "reject"
+        ch.updated_at = time.time()
         save_challenge(ch)
         data = challenge_public(ch)
+    await emit(ch.challenger_bot_id, "challenge_rejected", {"message": "challenge rejected", "challenge": data})
     await emit(ch.challenger_bot_id, "error", {"message": "challenge rejected", "challenge": data})
     return data
 
@@ -1258,6 +1432,7 @@ async def api_admin_create_bot(req: AdminBotCreateReq, _: None = Depends(require
     token = (req.token or secrets.token_urlsafe(32)).strip()
     if not token:
         raise HTTPException(status_code=400, detail="token cannot be empty")
+    policy = validate_challenge_policy(req.challenge_policy)
     async with state_lock:
         if token in tokens:
             raise HTTPException(status_code=409, detail="token already exists")
@@ -1267,6 +1442,7 @@ async def api_admin_create_bot(req: AdminBotCreateReq, _: None = Depends(require
             avatar_url=req.avatar_url, description=req.description, chess_style=req.chess_style or "random",
             persona_prompt=req.persona_prompt, engine_mode="random", client_type="astrbot",
             instance_name=None, is_public=req.is_public, is_enabled=req.is_enabled,
+            challenge_policy=policy, owner_review_timeout_sec=req.owner_review_timeout_sec,
         )
         bots[bot.id] = bot
         tokens[bot.token] = bot.id
