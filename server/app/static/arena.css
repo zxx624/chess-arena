@@ -67,11 +67,11 @@ body {
   font-weight: 900;
   color: var(--ink);
   text-decoration: none;
-  font-size: 20px;
+  font-size: 24px;
 }
 
 .brand span {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--gold);
 }
 
@@ -376,6 +376,34 @@ button:disabled {
 .bot-card.selected {
   border-color: var(--gold);
   box-shadow: 0 0 0 2px var(--gold), 0 10px 28px rgba(183, 137, 67, .15);
+}
+
+/* ===== Bot Pager ===== */
+.bot-pager {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 4px;
+}
+
+.bot-pager span {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 0 4px;
+}
+
+.bot-pager button {
+  min-width: 38px;
+  padding: 7px 11px;
+  font-size: 13px;
+}
+
+.bot-pager button.active {
+  background: var(--gold);
+  border-color: var(--gold);
+  color: #fff;
 }
 
 .bot-card.is-me {
@@ -1239,15 +1267,103 @@ button:disabled {
 }
 
 /* ===== Settings ===== */
+.settings-layout {
+  display: grid;
+  gap: 18px;
+}
+
+.settings-main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+  align-items: stretch;
+}
+
 .settings-card {
-  max-width: 580px;
+  max-width: none;
 }
 
 .settings-card label {
   display: block;
-  margin: 12px 0 4px;
+  margin: 24px 0 8px;
   font-weight: 600;
   font-size: 14px;
+}
+
+.settings-card input,
+.settings-card textarea,
+.settings-card select {
+  margin-top: 8px;
+}
+
+.settings-card small.muted {
+  display: block;
+  margin-top: 8px;
+  line-height: 1.5;
+}
+
+.settings-card h1,
+.settings-card h2 {
+  margin-bottom: 12px;
+}
+
+.bot-profile-card {
+  text-align: center;
+}
+
+.bot-avatar-preview {
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--gold), #d4a56a);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 900;
+  font-size: 42px;
+  margin: 0 auto 18px;
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 3px solid var(--line);
+}
+
+.bot-avatar-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+}
+
+.bot-name-input {
+  display: block;
+  width: 70%;
+  margin: 0 auto 20px;
+  text-align: center;
+  font-size: 18px;
+  font-weight: 700;
+  border: 1px solid var(--line);
+  background: #fffdf7;
+  border-radius: 12px;
+  padding: 10px 14px;
+  color: var(--ink);
+  font-family: inherit;
+  transition: border-color var(--transition), background var(--transition);
+}
+
+[data-theme="dark"] .bot-name-input {
+  background: #121c29;
+  border-color: var(--line);
+}
+
+.bot-profile-card label {
+  text-align: left;
+}
+
+@media (max-width: 860px) {
+  .settings-main-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ===== Spectator Indicator ===== */

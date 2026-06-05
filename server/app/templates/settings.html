@@ -1,48 +1,52 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="settings-layout">
+  <div class="settings-main-grid">
   <div class="panel settings-card">
-    <p class="eyebrow">个人设置</p>
     <h1>网页挑战身份</h1>
-    <p class="muted">这里填你要代表哪个 Bot 发起挑战。token 明文只保存在你当前浏览器的 localStorage，不会写进网页源码。管理员 token 也只保存在你的浏览器。</p>
+    <!-- <p class="muted">这里填你要代表哪个 Bot 发起挑战。token 明文只保存在你当前浏览器的 localStorage，不会写进网页源码。管理员 token 也只保存在你的浏览器。</p> -->
 
     <label>平台地址
       <input id="arenaBase" value="" placeholder="默认当前网站">
     </label>
-    <label>Bot Token 明文
+    <label>Bot Token 
       <input id="botToken" type="password" placeholder="粘贴 AstrBot 插件里的 token">
     </label>
-    <label>管理员 Token（只有站长填，普通用户留空）
-      <input id="adminToken" type="password" placeholder="用于暂停/停止任意棋局、一键停止全部">
-    </label>
+    <button id="verifyBtn" class="primary">验证 token</button>
+    <pre id="verifyResult" class="result-box">未验证</pre>
+
     <label>Bot 台词语音
       <select id="botSpeechVoice">
         <option value="">自动选择中文语音</option>
       </select>
-      <small class="muted">内置音色一定会显示；浏览器支持的系统音色会自动追加。</small>
+      <!-- <small class="muted">内置音色一定会显示；浏览器支持的系统音色会自动追加。</small> -->
     </label>
-    <label>Bot 台词语速 <span id="botSpeechRateLabel" class="muted">1.00×</span>
+    <label>语速 <span id="botSpeechRateLabel" class="muted">1.00×</span>
       <input id="botSpeechRate" type="range" min="0.5" max="1.5" step="0.05" value="0.95">
     </label>
-    <label>Bot 台词音高 <span id="botSpeechPitchLabel" class="muted">1.00</span>
+    <label>音高 <span id="botSpeechPitchLabel" class="muted">1.00</span>
       <input id="botSpeechPitch" type="range" min="0.5" max="2" step="0.05" value="1">
-      <small class="muted">浏览器 TTS 没有真正的 Hz 参数，这里调的是 pitch/音高。</small>
+      <!-- <small class="muted">浏览器 TTS 没有真正的 Hz 参数，这里调的是 pitch/音高。</small> -->
     </label>
-    <button id="testVoiceBtn" class="ghost" type="button">试听台词语音</button>
+    <button id="testVoiceBtn" class="ghost" type="button">试听</button>
+
+    <label>管理员 Token（普通用户留空）
+      <input id="adminToken" type="password" placeholder="XX">
+    </label>
+
     <div class="row-actions">
       <button id="toggleToken" class="ghost">显示/隐藏 token</button>
-      <button id="verifyBtn" class="primary">验证 token</button>
       <button id="saveBtn">保存到浏览器</button>
       <button id="clearBtn" class="danger">清空</button>
     </div>
-    <pre id="verifyResult" class="result-box">未验证</pre>
   </div>
 
-  <div class="panel settings-card">
+  <div class="panel settings-card bot-profile-card">
     <h2>我的 Bot 基础设置</h2>
-    <p class="muted">验证 token 后可以把这些资料同步到 Chess 平台。引擎和模型由 AstrBot 插件端控制，网页端只显示当前状态。</p>
-    <label>Bot 名字<input id="botName" placeholder="例如 咕噜GULU"></label>
-    <label>头像 URL<input id="avatarUrl" placeholder="可先留空"></label>
+    <!-- <p class="muted">验证 token 后可以把这些资料同步到 Chess 平台。引擎和模型由 AstrBot 插件端控制，网页端只显示当前状态。</p> -->
+    <div class="bot-avatar-preview" id="botAvatarPreview"></div>
+    <input id="botName" placeholder="Bot 名字" class="bot-name-input">
+    <label>头像 URL<input id="avatarUrl" placeholder="图片可到https://img.remit.ee/转换成url"></label>
     <label>简介<textarea id="description" rows="3" placeholder="显示在大厅 Bot 卡片上"></textarea></label>
     <label>棋风
       <select id="chessStyle">
@@ -58,15 +62,11 @@
     <button id="syncBtn" class="primary">同步设置到平台</button>
     <pre id="syncResult" class="result-box">未同步</pre>
   </div>
+  </div>
 
   <div class="panel settings-card">
-    <h2>AstrBot 插件怎么对接</h2>
-    <ol>
-      <li>插件 WebUI 里填同一个 <code>arena_base</code> 和 <code>token</code>。</li>
-      <li>token 留空且 <code>auto_register=true</code> 时，插件会自动注册并写回配置。</li>
-      <li>网页这里填同一个明文 token，就可以代表这个 Bot 发起挑战。</li>
-      <li>对手 Bot 插件在线、自动接挑战开启，就会响应并开始下棋。</li>
-    </ol>
+    <h2>AstrBot 插件地址</h2>
+    <p><a href="https://github.com/zxx624/astrbot_plugin_chess_arena" target="_blank">https://github.com/zxx624/astrbot_plugin_chess_arena</a></p>
   </div>
 </section>
 <script src="/static/settings.js"></script>

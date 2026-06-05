@@ -51,8 +51,29 @@ function fill(){
   if($('#botSpeechRate'))$('#botSpeechRate').value=clampNum(a.botSpeechRate,0.5,1.5,0.95);
   if($('#botSpeechPitch'))$('#botSpeechPitch').value=clampNum(a.botSpeechPitch,0.5,2,1);
   fillVoiceSelect(); updateVoiceLabels();
+  updateAvatarPreview();
 }
 function collectAudio(){return {botSpeechVoiceURI:selectedVoice(),botSpeechRate:selectedRate(),botSpeechPitch:selectedPitch()}}
+function avatarHash(name){
+  let h=0; for(let i=0;i<(name||'?').length;i++) h=(name.charCodeAt(i)+((h<<5)-h))|0;
+  const hue=Math.abs(h)%360;
+  return `linear-gradient(135deg,hsl(${hue},60%,50%),hsl(${(hue+35)%360},55%,38%))`;
+}
+function updateAvatarPreview(){
+  const el=$('#botAvatarPreview'); if(!el)return;
+  const name=($('#botName')?.value||'').trim()||'?';
+  const url=($('#avatarUrl')?.value||'').trim();
+  el.innerHTML='';
+  if(url){
+    const img=document.createElement('img');
+    img.src=url; img.alt=name;
+    img.onerror=()=>{el.innerHTML=''; el.style.background=avatarHash(name); el.textContent=name.slice(0,1)};
+    el.appendChild(img);
+  }else{
+    el.style.background=avatarHash(name);
+    el.textContent=name.slice(0,1);
+  }
+}
 function candidateBases(){
   const candidates=[base(), currentOrigin(), 'https://fazuo624.icu'];
   const out=[];
@@ -83,7 +104,7 @@ async function api(path,opts={}){
   throw new Error(errors.join('\n'));
 }
 function show(el,data){$(el).textContent=typeof data==='string'?data:JSON.stringify(data,null,2)}
-async function verify(){const me=await api('/api/bots/me'); show('#verifyResult',me); $('#botName').value=me.name||''; $('#avatarUrl').value=me.avatar_url||''; $('#description').value=me.description||''; $('#chessStyle').value=me.chess_style||'random'; $('#personaPrompt').value=me.persona_prompt||''; saveSettings({arenaBase:base(),token:token(),...me}); return me}
+async function verify(){const me=await api('/api/bots/me'); show('#verifyResult',me); $('#botName').value=me.name||''; $('#avatarUrl').value=me.avatar_url||''; $('#description').value=me.description||''; $('#chessStyle').value=me.chess_style||'random'; $('#personaPrompt').value=me.persona_prompt||''; saveSettings({arenaBase:base(),token:token(),...me}); updateAvatarPreview(); return me}
 function collect(){return {name:$('#botName').value.trim(),avatar_url:$('#avatarUrl').value.trim(),description:$('#description').value.trim(),chess_style:$('#chessStyle').value,persona_prompt:$('#personaPrompt').value.trim(),is_public:true}}
 function speakPreview(){
   if(!window.speechSynthesis){show('#verifyResult','当前浏览器不支持语音合成');return;}
@@ -107,4 +128,6 @@ window.addEventListener('DOMContentLoaded',()=>{
   $('#clearBtn').onclick=()=>{localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(AUDIO_KEY); fill(); show('#verifyResult','已清空')};
   $('#verifyBtn').onclick=()=>verify().catch(e=>show('#verifyResult','验证失败：'+e.message));
   $('#syncBtn').onclick=async()=>{try{const payload=collect(); const data=await api('/api/bots/me',{method:'PATCH',json:payload}); saveSettings({arenaBase:base(),token:token(),...payload,...data}); saveAudioSettings(collectAudio()); show('#syncResult',data)}catch(e){show('#syncResult','同步失败：'+e.message)}}
+  $('#botName')?.addEventListener('input',updateAvatarPreview);
+  $('#avatarUrl')?.addEventListener('input',updateAvatarPreview);
 });

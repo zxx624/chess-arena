@@ -1,5 +1,6 @@
 const STORAGE_KEY='chessArenaClientSettings';
-const state={bots:[],rankings:[],selected:null,me:null};
+const state={bots:[],rankings:[],selected:null,me:null,botPage:1};
+const BOT_PAGE_SIZE=6;
 const $=s=>document.querySelector(s);
 function cfg(){try{return JSON.parse(localStorage.getItem(STORAGE_KEY)||'{}')}catch{return {}}}
 function saveCfg(x){localStorage.setItem(STORAGE_KEY,JSON.stringify({...cfg(),...x}))}
@@ -58,12 +59,30 @@ async function load(){
   $('#statBots').textContent=state.bots.length; $('#statOnline').textContent=state.bots.filter(b=>b.online_status==='online').length; $('#statMatches').textContent=matches.total||0;
   renderBots(); renderRankings(); renderMatches(matches.matches||[]);
 }
+function filteredBots(){
+  const q=$('#search').value.trim().toLowerCase();
+  const only=$('#onlineOnly').checked;
+  return state.bots.filter(b=>(!q||(b.name||'').toLowerCase().includes(q)||(b.bot_id||'').toLowerCase().includes(q)||(b.chess_style||'').toLowerCase().includes(q))&&(!only||b.online_status==='online'));
+}
+function renderBotPager(total){
+  const pager=$('#botPager');
+  if(!pager)return;
+  const pages=Math.max(1,Math.ceil(total/BOT_PAGE_SIZE));
+  state.botPage=Math.min(Math.max(1,state.botPage),pages);
+  if(total<=BOT_PAGE_SIZE){pager.innerHTML='';return;}
+  const nums=Array.from({length:pages},(_,i)=>i+1).map(p=>`<button type="button" class="${p===state.botPage?'active':''}" data-page="${p}">${p}</button>`).join('');
+  pager.innerHTML=`<button type="button" data-page="${Math.max(1,state.botPage-1)}" ${state.botPage===1?'disabled':''}>上一页</button><span>${state.botPage} / ${pages}</span>${nums}<button type="button" data-page="${Math.min(pages,state.botPage+1)}" ${state.botPage===pages?'disabled':''}>下一页</button>`;
+  pager.querySelectorAll('button[data-page]').forEach(btn=>btn.onclick=()=>{state.botPage=Number(btn.dataset.page)||1;renderBots();});
+}
 function renderBots(){
-  const q=$('#search').value.trim().toLowerCase(); const only=$('#onlineOnly').checked; const grid=$('#botGrid'); grid.innerHTML='';
-  const list=state.bots.filter(b=>(!q||(b.name||'').toLowerCase().includes(q)||(b.bot_id||'').toLowerCase().includes(q)||(b.chess_style||'').toLowerCase().includes(q))&&(!only||b.online_status==='online'));
-  if(!list.length){grid.innerHTML='<p class="muted">暂无符合条件的 Bot。</p>';return}
+  const grid=$('#botGrid'); grid.innerHTML='';
+  const list=filteredBots();
+  if(!list.length){grid.innerHTML='<p class="muted">暂无符合条件的 Bot。</p>';renderBotPager(0);return}
+  const pages=Math.max(1,Math.ceil(list.length/BOT_PAGE_SIZE));
+  state.botPage=Math.min(Math.max(1,state.botPage),pages);
+  const visible=list.slice((state.botPage-1)*BOT_PAGE_SIZE,state.botPage*BOT_PAGE_SIZE);
   const tpl=$('#botCardTpl');
-  list.forEach(b=>{const r=rankFor(b.bot_id); const el=tpl.content.firstElementChild.cloneNode(true); el.dataset.id=b.bot_id;
+  visible.forEach(b=>{const r=rankFor(b.bot_id); const el=tpl.content.firstElementChild.cloneNode(true); el.dataset.id=b.bot_id;
     const isMe=state.me&&state.me.bot_id===b.bot_id; el.classList.toggle('selected',state.selected===b.bot_id); if(isMe)el.classList.add('is-me');
     renderAvatar(el.querySelector('.avatar'),b.name||b.bot_id,b.avatar_url); el.querySelector('h3').textContent=(b.name||b.bot_id)+(isMe?'（我）':'');
     el.querySelector('.desc').textContent=`${styleLabel(b.chess_style)} · ${b.description||'暂无简介'}`;
@@ -73,7 +92,13 @@ function renderBots(){
     const btn=el.querySelector('.challenge'); const isOffline=b.online_status!=='online'; btn.disabled=!!isMe||isOffline; btn.textContent=isMe?'自己':isOffline?'离线':'挑战'; if(!isOffline&&!isMe)btn.onclick=()=>challenge(b);
             el.querySelector('.stats-link').href=`/stats/${b.bot_id}`;
     grid.appendChild(el);
-  })
+  });
+  renderBotPager(list.length);
+}
+function setBotPageFromSelection(list){
+  if(!state.selected)return;
+  const idx=list.findIndex(b=>b.bot_id===state.selected);
+  if(idx>=0)state.botPage=Math.floor(idx/BOT_PAGE_SIZE)+1;
 }
 async function challenge(opponent){
   if(!state.me){alert('先去个人设置填入你的 Bot token，并验证成功。'); location.href='/settings'; return}
@@ -132,8 +157,8 @@ function showMatchPreview(m,info){
   modal.querySelector('.match-preview-backdrop').onclick=()=>modal.classList.remove('active');
 }
 
-$('#search').addEventListener('input',renderBots);$('#onlineOnly').addEventListener('change',renderBots);$('#refreshBtn').onclick=load;
-$('#randomBtn').onclick=()=>{const pool=state.bots.filter(b=>(!state.me||b.bot_id!==state.me.bot_id)&&(!$('#onlineOnly').checked||b.online_status==='online'));if(!pool.length)return;const b=pool[Math.floor(Math.random()*pool.length)];state.selected=b.bot_id;$('#pickedHint').textContent=`随机选中：${b.name}`;renderBots()};
+$('#search').addEventListener('input',()=>{state.botPage=1;renderBots()});$('#onlineOnly').addEventListener('change',()=>{state.botPage=1;renderBots()});$('#refreshBtn').onclick=load;
+$('#randomBtn').onclick=()=>{const pool=state.bots.filter(b=>(!state.me||b.bot_id!==state.me.bot_id)&&(!$('#onlineOnly').checked||b.online_status==='online'));if(!pool.length)return;const b=pool[Math.floor(Math.random()*pool.length)];state.selected=b.bot_id;$('#pickedHint').textContent=`随机选中：${b.name}`;setBotPageFromSelection(filteredBots());renderBots()};
 
 // ── Auto Match Queue ──
 let queuePollTimer=null;

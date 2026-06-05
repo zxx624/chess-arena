@@ -85,9 +85,9 @@ class Match:
     paused: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-    red_time_left_ms: int = 600_000
-    black_time_left_ms: int = 600_000
-    total_time_ms: int = 600_000
+    red_time_left_ms: int = 1_200_000
+    black_time_left_ms: int = 1_200_000
+    total_time_ms: int = 1_200_000
     last_move_at: float | None = None
     started_at: float | None = None
     finished_at: float | None = None
@@ -333,9 +333,9 @@ def load_state_from_db() -> None:
                 paused=bool(row["paused"]),
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
-                red_time_left_ms=row["red_time_left_ms"] if row["red_time_left_ms"] is not None else 600_000,
-                black_time_left_ms=row["black_time_left_ms"] if row["black_time_left_ms"] is not None else 600_000,
-                total_time_ms=row["total_time_ms"] if row["total_time_ms"] is not None else 600_000,
+                red_time_left_ms=row["red_time_left_ms"] if row["red_time_left_ms"] is not None else 1_200_000,
+                black_time_left_ms=row["black_time_left_ms"] if row["black_time_left_ms"] is not None else 1_200_000,
+                total_time_ms=row["total_time_ms"] if row["total_time_ms"] is not None else 1_200_000,
                 last_move_at=row["last_move_at"],
                 started_at=row["started_at"],
                 finished_at=row["finished_at"],
