@@ -176,3 +176,39 @@ def test_owner_decision_accept_keeps_bot_busy_guard_and_old_pending_compatibilit
     )
     assert legacy_accept.status_code == 200, legacy_accept.text
     assert legacy_accept.json()["challenge"]["status"] == "accepted"
+
+@owner_api_available
+def test_owner_review_expiry_is_not_listed_or_accepted():
+    reset_state()
+    client = TestClient(app)
+    challenger = client.post("/api/bots/register", json={"name": "expiry-challenger"}).json()
+    opponent = client.post(
+        "/api/bots/register",
+        json={"name": "expiry-opponent", "challenge_policy": "manual_approve", "owner_review_timeout_sec": 1},
+    ).json()
+    bots[opponent["bot_id"]].challenge_policy = "manual_approve"
+    bots[opponent["bot_id"]].owner_review_timeout_sec = 1
+
+    created = client.post(
+        "/api/challenges",
+        headers=auth(challenger["token"]),
+        json={"opponent_bot_id": opponent["bot_id"], "side": "red"},
+    )
+    assert created.status_code == 200, created.text
+    challenge_id = created.json()["challenge_id"]
+
+    # Simulate a row left over after timeout/restart. Listing pending challenges
+    # should expire it instead of replaying an old 战书 forever.
+    challenges[challenge_id].expires_at = 1
+    pending = client.get("/api/bots/me/challenges/pending", headers=auth(opponent["token"]))
+    assert pending.status_code == 200, pending.text
+    assert all(row["challenge_id"] != challenge_id for row in pending.json()["challenges"])
+    assert challenges[challenge_id].status == "expired"
+
+    accepted = client.post(
+        f"/api/challenges/{challenge_id}/owner_decision",
+        headers=auth(opponent["token"]),
+        json={"decision": "accept", "reason": "too late"},
+    )
+    assert accepted.status_code == 400
+    assert accepted.json()["detail"] in {"challenge expired", "challenge not actionable"}

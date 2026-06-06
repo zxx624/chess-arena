@@ -716,7 +716,25 @@ def create_match_from_challenge(ch: Challenge) -> Match:
     return Match(id=new_id("match"), red_bot_id=red_id, black_bot_id=black_id, challenge_id=ch.id)
 
 
+def expire_challenge_if_needed(ch: Challenge, now: float | None = None) -> bool:
+    """Mark timed-out owner-review challenges as expired before listing/replaying/deciding.
+
+    Older rows can survive process restarts, so this check is deliberately
+    centralized instead of only living in the owner_decision endpoint.
+    """
+    if ch.status != "owner_review" or not ch.expires_at:
+        return False
+    now = now or time.time()
+    if ch.expires_at >= now:
+        return False
+    ch.status = "expired"
+    ch.updated_at = now
+    save_challenge(ch)
+    return True
+
+
 def challenge_is_actionable(ch: Challenge) -> bool:
+    expire_challenge_if_needed(ch)
     return ch.status in ACTIONABLE_CHALLENGE_STATUSES
 
 
@@ -1332,14 +1350,11 @@ async def owner_decision(challenge_id: str, req: OwnerDecisionReq, bot: Bot = De
             raise HTTPException(status_code=404, detail="challenge not found")
         if ch.opponent_bot_id != bot.id:
             raise HTTPException(status_code=403, detail="only challenged bot can decide")
+        now = time.time()
+        if expire_challenge_if_needed(ch, now):
+            raise HTTPException(status_code=400, detail="challenge expired")
         if not challenge_is_actionable(ch):
             raise HTTPException(status_code=400, detail="challenge not actionable")
-        now = time.time()
-        if ch.status == "owner_review" and ch.expires_at and ch.expires_at < now:
-            ch.status = "expired"
-            ch.updated_at = now
-            save_challenge(ch)
-            raise HTTPException(status_code=400, detail="challenge expired")
         if decision == "accept":
             m = accept_challenge_locked(ch, owner_decision="accept", owner_decision_reason=req.reason)
             ch_data = challenge_public(ch)
@@ -1373,6 +1388,9 @@ async def accept_challenge(challenge_id: str, bot: Bot = Depends(get_current_bot
             raise HTTPException(status_code=404, detail="challenge not found")
         if ch.opponent_bot_id != bot.id:
             raise HTTPException(status_code=403, detail="only challenged bot can accept")
+        now = time.time()
+        if expire_challenge_if_needed(ch, now):
+            raise HTTPException(status_code=400, detail="challenge expired")
         if not challenge_is_actionable(ch):
             raise HTTPException(status_code=400, detail="challenge not actionable")
         m = accept_challenge_locked(ch)
@@ -1392,6 +1410,9 @@ async def reject_challenge(challenge_id: str, bot: Bot = Depends(get_current_bot
             raise HTTPException(status_code=404, detail="challenge not found")
         if ch.opponent_bot_id != bot.id:
             raise HTTPException(status_code=403, detail="only challenged bot can reject")
+        now = time.time()
+        if expire_challenge_if_needed(ch, now):
+            raise HTTPException(status_code=400, detail="challenge expired")
         if not challenge_is_actionable(ch):
             raise HTTPException(status_code=400, detail="challenge not actionable")
         ch.status = "rejected"
