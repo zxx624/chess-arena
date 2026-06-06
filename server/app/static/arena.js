@@ -1,5 +1,6 @@
 const STORAGE_KEY='chessArenaClientSettings';
-const state={bots:[],rankings:[],selected:null,me:null,botPage:1};
+const state={bots:[],rankings:[],selected:null,me:null,botPage:1,game:'xiangqi'};
+const GAME_META={xiangqi:{label:'象棋',eyebrow:'象棋大厅',hero:'找个 Bot，下盘棋。',hint:'准备好 token 后，选一位在线对手即可开局。'},go:{label:'围棋 9×9',eyebrow:'围棋 9×9 沙箱',hero:'找个 Bot，下盘 9 路围棋。',hint:'围棋 9×9 是沙箱 MVP：可挑战/观战，暂不支持完整数目或 KataGo。'},all:{label:'全部',eyebrow:'多游戏大厅',hero:'选择游戏，再找 Bot 开局。',hint:'全部模式用于浏览；发起挑战会按对手所属游戏创建。围棋 9×9 仍是沙箱 MVP，暂不支持完整数目/KataGo。'}};
 const BOT_PAGE_SIZE=6;
 const $=s=>document.querySelector(s);
 function cfg(){try{return JSON.parse(localStorage.getItem(STORAGE_KEY)||'{}')}catch{return {}}}
@@ -8,6 +9,13 @@ function authHeaders(){const t=(cfg().token||'').trim();return t?{Authorization:
 function queueAuthHeaders(){const t=(cfg().token||'').trim();return t?{...authHeaders(),'X-Bot-Token':t}:{...authHeaders()}}
 function normBots(payload){return Array.isArray(payload)?payload:(payload.bots||[])}
 function rankFor(id){return state.rankings.find(r=>r.bot_id===id)||{rating:1000,games:0,wins:0,losses:0,draws:0,win_rate:0}}
+function normalizeGame(v){v=(v||'xiangqi').toLowerCase();return ['xiangqi','go','all'].includes(v)?v:'xiangqi'}
+function apiGameParam(){return state.game==='all'?'':`game=${encodeURIComponent(state.game)}`}
+function apiUrl(path,params=[]){const qs=[apiGameParam(),...params].filter(Boolean).join('&');return qs?`${path}?${qs}`:path}
+function gameLabel(game){return (GAME_META[game]||GAME_META.xiangqi).label}
+function initGameFromUrl(){const params=new URLSearchParams(location.search);state.game=normalizeGame(params.get('game')||'xiangqi')}
+function updateGameUrl(){const url=new URL(location.href);if(state.game==='xiangqi')url.searchParams.delete('game');else url.searchParams.set('game',state.game);history.replaceState(null,'',url)}
+function updateGameUI(){const meta=GAME_META[state.game]||GAME_META.xiangqi;$('#gameEyebrow').textContent=meta.eyebrow;$('#gameHeroTitle').textContent=meta.hero;$('#gameHeroHint').textContent=meta.hint;document.querySelectorAll('.game-filter button[data-game]').forEach(btn=>btn.classList.toggle('active',btn.dataset.game===state.game));const notice=$('#gameNotice');if(notice){if(state.game==='go'){notice.textContent='围棋 9×9：沙箱 MVP，仅做基础落子/吃子/提子和网页观战，暂不接 KataGo，也不做完整数目。';notice.classList.remove('hidden')}else if(state.game==='all'){notice.textContent='全部模式只用于浏览；挑战会按对手所属游戏创建。自动匹配请先切到象棋或围棋。';notice.classList.remove('hidden')}else{notice.classList.add('hidden');notice.textContent=''}}}
 function styleLabel(style){
   const s=(style||'random').toLowerCase();
   const map={aggressive:'进攻',defensive:'防守',balanced:'均衡',random:'随性',positional:'布局',tactical:'战术',steady:'稳健',greedy:'贪吃',showman:'表演'};
@@ -50,12 +58,16 @@ function matchResultInfo(m){
 async function json(url,opts={}){const r=await fetch(url,opts);const text=await r.text();let data;try{data=text?JSON.parse(text):{}}catch{data={raw:text}}if(!r.ok){const e=new Error(`HTTP ${r.status} ${text}`);e.status=r.status;e.data=data;throw e}return data}
 function busyMessage(err){const d=err?.data?.detail;if(err?.status===409&&d?.code==='bot_busy'){return `这个 Bot 正在对局中，稍后再挑战。${d.match_id?'可先去观战：'+d.match_id:''}`}return err?.message||String(err)}
 async function loadMe(){const t=(cfg().token||'').trim(); if(!t){state.me=null; $('#myBotName').textContent='未设置'; $('#myBotId').textContent=''; return}
-  try{const me=await json('/api/bots/me',{headers:authHeaders()}); state.me=me; saveCfg({...me}); $('#myBotName').textContent=me.name||me.bot_id; $('#myBotId').textContent=' · '+me.bot_id}
+  try{const me=await json('/api/bots/me',{headers:authHeaders()}); state.me=me; saveCfg({...me}); const suffix=me.game?` · ${gameLabel(me.game)}`:''; $('#myBotName').textContent=me.name||me.bot_id; $('#myBotId').textContent=' · '+me.bot_id+suffix}
   catch(e){state.me=null; $('#myBotName').textContent='token 无效'; $('#myBotId').textContent=' · 去个人设置修改'} }
 async function load(){
+  updateGameUI();
   await loadMe();
-  const [bots,rankings,matches]=await Promise.all([json('/api/bots'),json('/api/rankings'),json('/api/admin/matches?limit=20')]);
-  state.bots=normBots(bots); state.rankings=rankings.rankings||[];
+  const botRequests=state.game==='all'?[json('/api/bots?game=xiangqi'),json('/api/bots?game=go')]:[json(apiUrl('/api/bots'))];
+  const rankingRequests=state.game==='all'?[json('/api/rankings?game=xiangqi'),json('/api/rankings?game=go')]:[json(apiUrl('/api/rankings'))];
+  const matchUrl=state.game==='all'?'/api/admin/matches?limit=20':apiUrl('/api/admin/matches',['limit=20']);
+  const [botPayloads,rankingPayloads,matches]=await Promise.all([Promise.all(botRequests),Promise.all(rankingRequests),json(matchUrl)]);
+  state.bots=botPayloads.flatMap(normBots); state.rankings=rankingPayloads.flatMap(r=>r.rankings||[]);
   $('#statBots').textContent=state.bots.length; $('#statOnline').textContent=state.bots.filter(b=>b.online_status==='online').length; $('#statMatches').textContent=matches.total||0;
   renderBots(); renderRankings(); renderMatches(matches.matches||[]);
 }
@@ -85,7 +97,7 @@ function renderBots(){
   visible.forEach(b=>{const r=rankFor(b.bot_id); const el=tpl.content.firstElementChild.cloneNode(true); el.dataset.id=b.bot_id;
     const isMe=state.me&&state.me.bot_id===b.bot_id; el.classList.toggle('selected',state.selected===b.bot_id); if(isMe)el.classList.add('is-me');
     renderAvatar(el.querySelector('.avatar'),b.name||b.bot_id,b.avatar_url); el.querySelector('h3').textContent=(b.name||b.bot_id)+(isMe?'（我）':'');
-    el.querySelector('.desc').textContent=`${styleLabel(b.chess_style)} · ${b.description||'暂无简介'}`;
+    el.querySelector('.desc').textContent=`${gameLabel(b.game||'xiangqi')} · ${styleLabel(b.chess_style)} · ${b.description||'暂无简介'}`;
     const st=el.querySelector('.status'); st.textContent=b.online_status==='online'?'在线':'离线'; st.classList.toggle('online',b.online_status==='online');
     el.querySelector('.record').textContent=`${r.rating} 分 · ${r.games} 局 · ${Math.round((r.win_rate||0)*100)}%`;
     el.querySelector('.pick').onclick=()=>{state.selected=b.bot_id;$('#pickedHint').textContent=`已选择：${b.name}`;renderBots()};
@@ -105,14 +117,15 @@ async function challenge(opponent){
   if(opponent.bot_id===state.me.bot_id){alert('不能挑战自己'); return}
   if(opponent.online_status!=='online' && !confirm('对手当前显示离线，可能不会响应。仍然挑战吗？')) return;
   try{
-    const ch=await json('/api/challenges',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},body:JSON.stringify({opponent_bot_id:opponent.bot_id,side:'random'})});
+    const game=opponent.game||state.me?.game||state.game||'xiangqi';
+    const ch=await json('/api/challenges',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},body:JSON.stringify({opponent_bot_id:opponent.bot_id,side:'random',game})});
     $('#pickedHint').textContent=`挑战已发送：${opponent.name}，等待自动接受...`;
     waitMatch(ch.challenge_id);
   }catch(e){
     alert('挑战失败：'+busyMessage(e));
   }
 }
-async function waitMatch(challengeId){for(let i=0;i<40;i++){const data=await json('/api/admin/matches?limit=20'); const m=(data.matches||[]).find(x=>x.challenge_id===challengeId); if(m){location.href='/matches/'+m.match_id;return} await new Promise(r=>setTimeout(r,1000))} alert('已发出挑战，但暂未生成对局。对手插件可能没在线或没自动接挑战。')}
+async function waitMatch(challengeId){for(let i=0;i<40;i++){const data=await json(apiUrl('/api/admin/matches',['limit=20'])); const m=(data.matches||[]).find(x=>x.challenge_id===challengeId); if(m){location.href='/matches/'+m.match_id;return} await new Promise(r=>setTimeout(r,1000))} alert('已发出挑战，但暂未生成对局。对手插件可能没在线或没自动接挑战。')}
 function renderRankings(){
   const ol=$('#rankingList');ol.innerHTML='';
   const list=state.rankings;
@@ -157,8 +170,8 @@ function showMatchPreview(m,info){
   modal.querySelector('.match-preview-backdrop').onclick=()=>modal.classList.remove('active');
 }
 
-$('#search').addEventListener('input',()=>{state.botPage=1;renderBots()});$('#onlineOnly').addEventListener('change',()=>{state.botPage=1;renderBots()});$('#refreshBtn').onclick=load;
-$('#randomBtn').onclick=()=>{const pool=state.bots.filter(b=>(!state.me||b.bot_id!==state.me.bot_id)&&(!$('#onlineOnly').checked||b.online_status==='online'));if(!pool.length)return;const b=pool[Math.floor(Math.random()*pool.length)];state.selected=b.bot_id;$('#pickedHint').textContent=`随机选中：${b.name}`;setBotPageFromSelection(filteredBots());renderBots()};
+$('#search').addEventListener('input',()=>{state.botPage=1;renderBots()});$('#onlineOnly').addEventListener('change',()=>{state.botPage=1;renderBots()});$('#refreshBtn').onclick=load;document.querySelectorAll('.game-filter button[data-game]').forEach(btn=>btn.onclick=()=>{state.game=normalizeGame(btn.dataset.game);state.selected=null;state.botPage=1;updateGameUrl();load().catch(e=>{$('#botGrid').innerHTML=`<p class="muted">加载失败：${e.message}</p>`})});
+$('#randomBtn').onclick=()=>{const pool=state.bots.filter(b=>(!state.me||b.bot_id!==state.me.bot_id)&&(!$('#onlineOnly').checked||b.online_status==='online')&&(state.game==='all'||(b.game||'xiangqi')===state.game));if(!pool.length)return;const b=pool[Math.floor(Math.random()*pool.length)];state.selected=b.bot_id;$('#pickedHint').textContent=`随机选中：${b.name}`;setBotPageFromSelection(filteredBots());renderBots()};
 
 // ── Auto Match Queue ──
 let queuePollTimer=null;
@@ -166,7 +179,8 @@ $('#autoMatchBtn').onclick=async()=>{
   const t=(cfg().token||'').trim(); if(!t){alert('先去个人设置填入你的 Bot token。'); location.href='/settings'; return;}
   if(!state.me){alert('请先验证 token 后再试。'); return;}
   try{
-    const r=await fetch('/api/queue/join',{method:'POST',headers:{...queueAuthHeaders(),'Content-Type':'application/json'}});
+    if(state.game==='all'){alert('自动匹配请先选择象棋或围棋 9×9。');return;}
+    const r=await fetch(apiUrl('/api/queue/join'),{method:'POST',headers:{...queueAuthHeaders(),'Content-Type':'application/json'}});
     if(!r.ok){const text=await r.text();let errData={};try{errData=text?JSON.parse(text):{} }catch{} const err=new Error(`HTTP ${r.status} ${text}`);err.status=r.status;err.data=errData; alert('加入队列失败：'+busyMessage(err)); return;}
     const data=await r.json();
     if(data.matched){
@@ -186,13 +200,13 @@ $('#autoMatchBtn').onclick=async()=>{
 };
 async function pollQueue(){
   try{
-    const r=await fetch('/api/queue/status');
+    const r=await fetch(apiUrl('/api/queue/status'));
     const data=await r.json();
     $('#queueCount').textContent=`队列中 ${data.count} 人`;
     // Check if we were matched (removed from queue, a match exists)
     if(data.count===0||!data.queue.some(e=>e.bot_id===state.me?.bot_id)){
       // We may have been matched - check recent matches
-      const mr=await fetch('/api/admin/matches?limit=5');
+      const mr=await fetch(apiUrl('/api/admin/matches',['limit=5']));
       const md=await mr.json();
       const recent=md.matches||[];
       const ourMatch=recent.find(m=>m.red_bot_id===state.me.bot_id||m.black_bot_id===state.me.bot_id);
@@ -225,4 +239,4 @@ $('#queueLeaveBtn').onclick=async()=>{
 };
 window.addEventListener('beforeunload',()=>{if(queuePollTimer)clearInterval(queuePollTimer);});
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&queuePollTimer)clearInterval(queuePollTimer);});
-load().catch(e=>{$('#botGrid').innerHTML=`<p class="muted">加载失败：${e.message}</p>`});
+initGameFromUrl();updateGameUI();load().catch(e=>{$('#botGrid').innerHTML=`<p class="muted">加载失败：${e.message}</p>`});

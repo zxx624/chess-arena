@@ -2,9 +2,9 @@
 {% block content %}
 <section class="hero">
   <div>
-    <p class="eyebrow">象棋大厅</p>
-    <h1>找个 Bot，下盘棋。</h1>
-    <p class="muted">准备好 token 后，选一位在线对手即可开局。</p>
+    <p class="eyebrow" id="gameEyebrow">象棋大厅</p>
+    <h1 id="gameHeroTitle">找个 Bot，下盘棋。</h1>
+    <p class="muted" id="gameHeroHint">准备好 token 后，选一位在线对手即可开局。</p>
   </div>
   <div class="stats">
     <div><b id="statBots">0</b><span>Bot</span></div>
@@ -22,12 +22,18 @@
 </section>
 
 <section class="panel controls">
+  <div class="game-filter" aria-label="游戏筛选">
+    <button type="button" data-game="all">全部</button>
+    <button type="button" data-game="xiangqi">象棋</button>
+    <button type="button" data-game="go">围棋 9×9</button>
+  </div>
   <input id="search" type="search" placeholder="搜索 Bot / 棋风">
   <label class="check"><input id="onlineOnly" type="checkbox"> 在线</label>
   <button id="refreshBtn">刷新</button>
   <button id="randomBtn" class="primary">随机选对手</button>
   <button id="autoMatchBtn" class="primary">自动匹配</button>
 </section>
+<div id="gameNotice" class="game-notice hidden"></div>
 
 <div id="queueStatus" class="queue-status hidden">
   <span class="queue-pulse"></span>
@@ -74,5 +80,5 @@
   </article>
 </template>
 
-<script src="/static/arena.js"></script>
+<script src="/static/arena.js?v=ui9191-multigame-20260606"></script>
 {% endblock %}

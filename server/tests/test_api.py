@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.engine import legal_moves
 import app.main as main_module
-from app.main import app, bots, challenges, load_state_from_db, matches, Bot, save_bot, save_match, update_rankings_for_finished_match
+from app.main import app, bots, challenges, load_state_from_db, matches, active_match_for_bot, Bot, Match, save_bot, save_match, sweep_match_timeouts_once, update_rankings_for_finished_match
 
 
 def auth(token: str):
@@ -60,6 +60,61 @@ def test_fake_bot_smoke_match_n_steps():
     final = client.get(f"/api/matches/{match_id}", headers=auth(a["token"])).json()
     assert final["ply"] >= 12
     assert len(final["moves"]) >= 12
+
+
+def test_bots_filter_by_game_and_default_xiangqi(monkeypatch):
+    reset_state()
+    monkeypatch.setattr(main_module, "SUPPORTED_GAMES", {"xiangqi", "go"})
+    client = TestClient(app)
+    x = client.post("/api/bots/register", json={"name": "xiangqi-filter-a"}).json()
+    g = client.post("/api/bots/register", json={"name": "go-filter-a", "game": "go"}).json()
+
+    default_listing = client.get("/api/bots").json()
+    xiangqi_listing = client.get("/api/bots?game=xiangqi").json()
+    go_listing = client.get("/api/bots?game=go").json()
+
+    assert {b["bot_id"] for b in default_listing["bots"]} == {x["bot_id"]}
+    assert {b["bot_id"] for b in xiangqi_listing["bots"]} == {x["bot_id"]}
+    assert {b["bot_id"] for b in go_listing["bots"]} == {g["bot_id"]}
+
+
+def test_challenge_and_match_preserve_requested_game(monkeypatch):
+    reset_state()
+    monkeypatch.setattr(main_module, "SUPPORTED_GAMES", {"xiangqi", "go"})
+    client = TestClient(app)
+    a = client.post("/api/bots/register", json={"name": "go-a", "game": "go"}).json()
+    b = client.post("/api/bots/register", json={"name": "go-b", "game": "go"}).json()
+
+    ch = client.post(
+        "/api/challenges",
+        headers=auth(a["token"]),
+        json={"opponent_bot_id": b["bot_id"], "side": "red", "game": "go"},
+    ).json()
+    assert ch["game"] == "go"
+
+    accepted = client.post(f"/api/challenges/{ch['challenge_id']}/accept", headers=auth(b["token"])).json()
+    assert accepted["challenge"]["game"] == "go" if "challenge" in accepted else accepted["game"] == "go"
+    assert accepted["match"]["game"] == "go"
+    assert matches[accepted["match_id"]].game == "go"
+
+
+def test_challenge_without_game_defaults_to_xiangqi(monkeypatch):
+    reset_state()
+    monkeypatch.setattr(main_module, "SUPPORTED_GAMES", {"xiangqi", "go"})
+    client = TestClient(app)
+    a = client.post("/api/bots/register", json={"name": "default-xiangqi-a"}).json()
+    b = client.post("/api/bots/register", json={"name": "default-xiangqi-b"}).json()
+
+    ch = client.post(
+        "/api/challenges",
+        headers=auth(a["token"]),
+        json={"opponent_bot_id": b["bot_id"], "side": "red"},
+    ).json()
+    accepted = client.post(f"/api/challenges/{ch['challenge_id']}/accept", headers=auth(b["token"])).json()
+
+    assert ch["game"] == "xiangqi"
+    assert accepted["match"]["game"] == "xiangqi"
+    assert matches[accepted["match_id"]].game == "xiangqi"
 
 
 def test_illegal_move_rejected_and_turn_enforced():
@@ -298,6 +353,39 @@ def test_match_control_permissions_and_admin_stop_all(monkeypatch):
     assert stopped.json()["stopped"] >= 2
     assert client.get(f"/api/admin/matches/{match_id}").json()["status"] == "finished"
     assert client.get(f"/api/admin/matches/{match_id2}").json()["finish_reason"] == "stopped_all_by_admin"
+
+
+def test_timeout_sweeper_finishes_expired_active_match_without_new_move():
+    reset_state()
+    bots["red-timeout"] = Bot(id="red-timeout", name="Red Timeout", token="red-token")
+    bots["black-winner"] = Bot(id="black-winner", name="Black Winner", token="black-token")
+    matches["timeout-match"] = Match(
+        id="timeout-match",
+        red_bot_id="red-timeout",
+        black_bot_id="black-winner",
+        red_time_left_ms=50,
+        black_time_left_ms=1_800_000,
+        total_time_ms=1_800_000,
+        last_move_at=1_000.0,
+        started_at=1_000.0,
+        created_at=1_000.0,
+        updated_at=1_000.0,
+    )
+    save_bot(bots["red-timeout"])
+    save_bot(bots["black-winner"])
+    save_match(matches["timeout-match"])
+
+    finished = main_module.asyncio.run(sweep_match_timeouts_once())
+
+    assert len(finished) == 1
+    m = matches["timeout-match"]
+    assert m.status == "finished"
+    assert m.result == "black_win"
+    assert m.winner_bot_id == "black-winner"
+    assert m.finish_reason == "timeout"
+    assert m.red_time_left_ms == 0
+    assert m.black_time_left_ms == 1_800_000
+    assert active_match_for_bot("red-timeout") is None
 
 
 def test_busy_bot_cannot_create_accept_or_join_queue(monkeypatch):

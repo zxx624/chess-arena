@@ -20,6 +20,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from .engine import BLACK, INITIAL_FEN, RED, RuleError, apply_ucci, is_in_check, legal_moves, parse_fen
+from .games import go9
 
 DB_PATH = Path(os.environ.get("CHESS_ARENA_DB", "/mnt/cosmem/gulu1-1415708756/chess-arena/chess_arena.db"))
 BASE_DIR = Path(__file__).resolve().parent
@@ -30,6 +31,16 @@ ADMIN_TOKEN = os.environ.get("CHESS_ARENA_ADMIN_TOKEN", "").strip()
 app = FastAPI(title="chess-arena-server", version="0.2.0")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+DEFAULT_GAME = "xiangqi"
+SUPPORTED_GAMES = {"xiangqi", "go"}
+
+
+def normalize_game(game: str | None) -> str:
+    value = (game or DEFAULT_GAME).strip().lower()
+    if value not in SUPPORTED_GAMES:
+        raise HTTPException(status_code=400, detail=f"unsupported game: {value}")
+    return value
 
 
 class Side(str, Enum):
@@ -58,6 +69,7 @@ class Bot:
     updated_at: float = field(default_factory=time.time)
     challenge_policy: str = "auto_accept"
     owner_review_timeout_sec: int = 180
+    game: str = DEFAULT_GAME
 
 
 @dataclass
@@ -73,6 +85,7 @@ class Challenge:
     owner_decision_reason: str | None = None
     expires_at: float | None = None
     updated_at: float = field(default_factory=time.time)
+    game: str = DEFAULT_GAME
 
 
 @dataclass
@@ -91,12 +104,13 @@ class Match:
     paused: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-    red_time_left_ms: int = 1_200_000
-    black_time_left_ms: int = 1_200_000
-    total_time_ms: int = 1_200_000
+    red_time_left_ms: int = 1_800_000
+    black_time_left_ms: int = 1_800_000
+    total_time_ms: int = 1_800_000
     last_move_at: float | None = None
     started_at: float | None = None
     finished_at: float | None = None
+    game: str = DEFAULT_GAME
 
 
 bots: dict[str, Bot] = {}
@@ -107,9 +121,11 @@ subscribers: dict[str, set[asyncio.Queue]] = {}
 match_sse_queues: dict[str, set[asyncio.Queue]] = {}
 match_queue_entries: dict[str, dict[str, Any]] = {}  # bot_id -> {bot_id, rating, joined_at}
 state_lock = asyncio.Lock()
+timeout_sweeper_task: asyncio.Task | None = None
 
 CHALLENGE_POLICIES = {"auto_accept", "manual_approve", "reject_all"}
 ACTIONABLE_CHALLENGE_STATUSES = {"pending", "owner_review"}
+MATCH_TIMEOUT_SWEEP_INTERVAL_SEC = 2
 
 
 class RegisterReq(BaseModel):
@@ -124,6 +140,7 @@ class RegisterReq(BaseModel):
     is_public: bool = True
     challenge_policy: str = "auto_accept"
     owner_review_timeout_sec: int = 180
+    game: str = DEFAULT_GAME
 
 
 class BotUpdateReq(BaseModel):
@@ -136,11 +153,13 @@ class BotUpdateReq(BaseModel):
     is_enabled: bool | None = None
     challenge_policy: str | None = None
     owner_review_timeout_sec: int | None = Field(default=None, ge=1, le=3600)
+    game: str | None = None
 
 
 class ChallengeReq(BaseModel):
     opponent_bot_id: str
     side: Side | None = None
+    game: str | None = None
 
 
 class OwnerDecisionReq(BaseModel):
@@ -149,7 +168,7 @@ class OwnerDecisionReq(BaseModel):
 
 
 class MoveReq(BaseModel):
-    move: str = Field(min_length=4, max_length=4)
+    move: str = Field(min_length=2, max_length=4)
     comment: str | None = None
     duration_ms: int | None = None
 
@@ -170,6 +189,7 @@ class AdminBotCreateReq(BaseModel):
     is_enabled: bool = True
     challenge_policy: str = "auto_accept"
     owner_review_timeout_sec: int = 180
+    game: str = DEFAULT_GAME
 
 
 def db_connect() -> sqlite3.Connection:
@@ -281,14 +301,17 @@ def init_db() -> None:
             "updated_at": "REAL",
             "challenge_policy": "TEXT DEFAULT 'auto_accept'",
             "owner_review_timeout_sec": "INTEGER DEFAULT 180",
+            "game": "TEXT DEFAULT 'xiangqi'",
         })
         ensure_columns(conn, "challenges", {
             "owner_decision": "TEXT",
             "owner_decision_reason": "TEXT",
             "expires_at": "REAL",
             "updated_at": "REAL",
+            "game": "TEXT DEFAULT 'xiangqi'",
         })
         ensure_columns(conn, "matches", {
+            "game": "TEXT DEFAULT 'xiangqi'",
             "winner_bot_id": "TEXT",
             "finish_reason": "TEXT",
             "paused": "INTEGER DEFAULT 0",
@@ -298,6 +321,9 @@ def init_db() -> None:
             "last_move_at": "REAL",
             "started_at": "REAL",
             "finished_at": "REAL",
+        })
+        ensure_columns(conn, "match_queue", {
+            "game": "TEXT DEFAULT 'xiangqi'",
         })
         now = time.time()
         conn.execute("UPDATE bots SET updated_at = COALESCE(updated_at, created_at, ?)", (now,))
@@ -333,6 +359,7 @@ def load_state_from_db() -> None:
                 updated_at=row["updated_at"] or row["created_at"],
                 challenge_policy=row["challenge_policy"] if row["challenge_policy"] in CHALLENGE_POLICIES else "auto_accept",
                 owner_review_timeout_sec=int(row["owner_review_timeout_sec"] or 180),
+                game=row["game"] or DEFAULT_GAME,
             )
             bots[bot.id] = bot
             tokens[bot.token] = bot.id
@@ -349,6 +376,7 @@ def load_state_from_db() -> None:
                 owner_decision_reason=row["owner_decision_reason"],
                 expires_at=row["expires_at"],
                 updated_at=row["updated_at"] or row["created_at"],
+                game=row["game"] or DEFAULT_GAME,
             )
         for row in conn.execute("SELECT * FROM matches"):
             try:
@@ -370,12 +398,13 @@ def load_state_from_db() -> None:
                 paused=bool(row["paused"]),
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
-                red_time_left_ms=row["red_time_left_ms"] if row["red_time_left_ms"] is not None else 1_200_000,
-                black_time_left_ms=row["black_time_left_ms"] if row["black_time_left_ms"] is not None else 1_200_000,
-                total_time_ms=row["total_time_ms"] if row["total_time_ms"] is not None else 1_200_000,
+                red_time_left_ms=row["red_time_left_ms"] if row["red_time_left_ms"] is not None else 1_800_000,
+                black_time_left_ms=row["black_time_left_ms"] if row["black_time_left_ms"] is not None else 1_800_000,
+                total_time_ms=row["total_time_ms"] if row["total_time_ms"] is not None else 1_800_000,
                 last_move_at=row["last_move_at"],
                 started_at=row["started_at"],
                 finished_at=row["finished_at"],
+                game=row["game"] or DEFAULT_GAME,
             )
 
         for row in conn.execute("SELECT * FROM match_queue"):
@@ -383,21 +412,22 @@ def load_state_from_db() -> None:
                 "bot_id": row["bot_id"],
                 "rating": row["rating"] or 1000,
                 "joined_at": row["joined_at"],
+                "game": row["game"] or DEFAULT_GAME,
             }
 
 
 def save_bot(bot: Bot) -> None:
     with db_connect() as conn:
         conn.execute(
-            """INSERT INTO bots(id, name, token, created_at, avatar_url, description, chess_style, persona_prompt, engine_mode, client_type, instance_name, is_public, is_enabled, online_status, last_seen_at, updated_at, challenge_policy, owner_review_timeout_sec)
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO bots(id, name, token, created_at, avatar_url, description, chess_style, persona_prompt, engine_mode, client_type, instance_name, is_public, is_enabled, online_status, last_seen_at, updated_at, challenge_policy, owner_review_timeout_sec, game)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET name=excluded.name, token=excluded.token, created_at=excluded.created_at,
                  avatar_url=excluded.avatar_url, description=excluded.description, chess_style=excluded.chess_style,
                  persona_prompt=excluded.persona_prompt, engine_mode=excluded.engine_mode, client_type=excluded.client_type,
                  instance_name=excluded.instance_name, is_public=excluded.is_public, is_enabled=excluded.is_enabled,
                  online_status=excluded.online_status, last_seen_at=excluded.last_seen_at, updated_at=excluded.updated_at,
-                 challenge_policy=excluded.challenge_policy, owner_review_timeout_sec=excluded.owner_review_timeout_sec""",
-            (bot.id, bot.name, bot.token, bot.created_at, bot.avatar_url, bot.description, bot.chess_style, bot.persona_prompt, bot.engine_mode, bot.client_type, bot.instance_name, int(bot.is_public), int(bot.is_enabled), bot.online_status, bot.last_seen_at, bot.updated_at, bot.challenge_policy, bot.owner_review_timeout_sec),
+                 challenge_policy=excluded.challenge_policy, owner_review_timeout_sec=excluded.owner_review_timeout_sec, game=excluded.game""",
+            (bot.id, bot.name, bot.token, bot.created_at, bot.avatar_url, bot.description, bot.chess_style, bot.persona_prompt, bot.engine_mode, bot.client_type, bot.instance_name, int(bot.is_public), int(bot.is_enabled), bot.online_status, bot.last_seen_at, bot.updated_at, bot.challenge_policy, bot.owner_review_timeout_sec, bot.game),
         )
         conn.execute("INSERT OR IGNORE INTO rankings(bot_id, rating, games, wins, losses, draws, win_rate, streak, updated_at) VALUES(?, 1000, 0, 0, 0, 0, 0, 0, ?)", (bot.id, time.time()))
 
@@ -405,8 +435,8 @@ def save_bot(bot: Bot) -> None:
 def save_challenge(ch: Challenge) -> None:
     with db_connect() as conn:
         conn.execute(
-            """INSERT INTO challenges(id, challenger_bot_id, opponent_bot_id, challenger_side, status, match_id, created_at, owner_decision, owner_decision_reason, expires_at, updated_at)
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO challenges(id, challenger_bot_id, opponent_bot_id, challenger_side, status, match_id, created_at, owner_decision, owner_decision_reason, expires_at, updated_at, game)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  challenger_bot_id=excluded.challenger_bot_id,
                  opponent_bot_id=excluded.opponent_bot_id,
@@ -417,16 +447,17 @@ def save_challenge(ch: Challenge) -> None:
                  owner_decision=excluded.owner_decision,
                  owner_decision_reason=excluded.owner_decision_reason,
                  expires_at=excluded.expires_at,
-                 updated_at=excluded.updated_at""",
-            (ch.id, ch.challenger_bot_id, ch.opponent_bot_id, ch.challenger_side, ch.status, ch.match_id, ch.created_at, ch.owner_decision, ch.owner_decision_reason, ch.expires_at, ch.updated_at),
+                 updated_at=excluded.updated_at,
+                 game=excluded.game""",
+            (ch.id, ch.challenger_bot_id, ch.opponent_bot_id, ch.challenger_side, ch.status, ch.match_id, ch.created_at, ch.owner_decision, ch.owner_decision_reason, ch.expires_at, ch.updated_at, ch.game),
         )
 
 
 def save_match(m: Match) -> None:
     with db_connect() as conn:
         conn.execute(
-            """INSERT INTO matches(id, red_bot_id, black_bot_id, fen, status, result, winner_bot_id, finish_reason, ply, moves_json, challenge_id, paused, created_at, updated_at, red_time_left_ms, black_time_left_ms, total_time_ms, last_move_at, started_at, finished_at)
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO matches(id, red_bot_id, black_bot_id, fen, status, result, winner_bot_id, finish_reason, ply, moves_json, challenge_id, paused, created_at, updated_at, red_time_left_ms, black_time_left_ms, total_time_ms, last_move_at, started_at, finished_at, game)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  red_bot_id=excluded.red_bot_id,
                  black_bot_id=excluded.black_bot_id,
@@ -446,8 +477,9 @@ def save_match(m: Match) -> None:
                  total_time_ms=excluded.total_time_ms,
                  last_move_at=excluded.last_move_at,
                  started_at=excluded.started_at,
-                 finished_at=excluded.finished_at""",
-            (m.id, m.red_bot_id, m.black_bot_id, m.fen, m.status, m.result, m.winner_bot_id, m.finish_reason, m.ply, json.dumps(m.moves, ensure_ascii=False), m.challenge_id, int(m.paused), m.created_at, m.updated_at, m.red_time_left_ms, m.black_time_left_ms, m.total_time_ms, m.last_move_at, m.started_at, m.finished_at),
+                 finished_at=excluded.finished_at,
+                 game=excluded.game""",
+            (m.id, m.red_bot_id, m.black_bot_id, m.fen, m.status, m.result, m.winner_bot_id, m.finish_reason, m.ply, json.dumps(m.moves, ensure_ascii=False), m.challenge_id, int(m.paused), m.created_at, m.updated_at, m.red_time_left_ms, m.black_time_left_ms, m.total_time_ms, m.last_move_at, m.started_at, m.finished_at, m.game),
         )
         for mv in m.moves:
             move_id = mv.get("move_id") or f"move_{m.id}_{mv.get('ply')}"
@@ -455,7 +487,7 @@ def save_match(m: Match) -> None:
             conn.execute(
                 """INSERT OR IGNORE INTO moves(id, match_id, ply, bot_id, side, move, fen_before, fen_after, captured, comment, duration_ms, created_at)
                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (move_id, m.id, mv.get("ply"), mv.get("bot_id"), mv.get("side"), mv.get("move"), mv.get("fen_before"), mv.get("fen_after"), mv.get("captured"), mv.get("comment"), mv.get("duration_ms"), mv.get("created_at")),
+                (move_id, m.id, mv.get("ply"), mv.get("bot_id"), mv.get("side"), mv.get("move"), mv.get("fen_before"), mv.get("fen_after"), json.dumps(mv.get("captured"), ensure_ascii=False) if isinstance(mv.get("captured"), (list, dict)) else mv.get("captured"), mv.get("comment"), mv.get("duration_ms"), mv.get("created_at")),
             )
 
 
@@ -466,9 +498,97 @@ def refresh_state_from_db() -> None:
     load_state_from_db()
 
 
+async def finish_timeout_match_locked(m: Match, now: float | None = None) -> dict[str, Any] | None:
+    """Finish an active match whose side-to-move clock has expired.
+
+    Caller must hold state_lock. The normal move endpoint checks this right
+    before accepting a move; the background sweeper uses the same helper so a
+    Bot that never submits again still loses on time.
+    """
+    if m.status != "active" or m.paused:
+        return None
+    # Go MVP stores JSON state in Match.fen; do not send it through xiangqi parse_fen.
+    # Go clocks/forfeit timeout will be implemented separately after the MVP is stable.
+    if m.game == "go":
+        return None
+    now = now or time.time()
+    _, turn, _, _ = parse_fen(m.fen)
+    if m.ply == 0:
+        base = m.started_at or m.last_move_at or m.created_at
+    else:
+        base = m.last_move_at or m.started_at or m.created_at
+    elapsed_ms = max(0, int((now - base) * 1000))
+    if turn == RED:
+        remaining = max(0, m.red_time_left_ms - elapsed_ms)
+        if remaining > 0:
+            return None
+        m.red_time_left_ms = 0
+        winner = BLACK
+        winner_bot_id = m.black_bot_id
+    else:
+        remaining = max(0, m.black_time_left_ms - elapsed_ms)
+        if remaining > 0:
+            return None
+        m.black_time_left_ms = 0
+        winner = RED
+        winner_bot_id = m.red_bot_id
+    m.status = "finished"
+    m.result = f"{winner}_win"
+    m.winner_bot_id = winner_bot_id
+    m.finish_reason = "timeout"
+    m.last_move_at = now
+    m.updated_at = now
+    m.finished_at = now
+    save_match(m)
+    update_rankings_for_finished_match(m)
+    return {"match": match_public(m), "timeout": True, "side": turn}
+
+
+async def sweep_match_timeouts_once() -> list[tuple[str, list[str], dict[str, Any]]]:
+    finished: list[tuple[str, list[str], dict[str, Any]]] = []
+    async with state_lock:
+        now = time.time()
+        for m in list(matches.values()):
+            data = await finish_timeout_match_locked(m, now)
+            if not data:
+                continue
+            finished.append((m.id, [m.red_bot_id, m.black_bot_id], data))
+    for match_id, participants, data in finished:
+        for pid in participants:
+            await emit(pid, "match_finished", data["match"])
+        await broadcast_match_sse(match_id)
+    return finished
+
+
+async def match_timeout_sweeper() -> None:
+    while True:
+        await asyncio.sleep(MATCH_TIMEOUT_SWEEP_INTERVAL_SEC)
+        try:
+            await sweep_match_timeouts_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[match-timeout-sweeper] error: {exc}")
+
+
 @app.on_event("startup")
 async def startup_load_state() -> None:
+    global timeout_sweeper_task
     load_state_from_db()
+    if timeout_sweeper_task is None or timeout_sweeper_task.done():
+        timeout_sweeper_task = asyncio.create_task(match_timeout_sweeper())
+
+
+@app.on_event("shutdown")
+async def shutdown_timeout_sweeper() -> None:
+    global timeout_sweeper_task
+    if timeout_sweeper_task is not None:
+        timeout_sweeper_task.cancel()
+        try:
+            await timeout_sweeper_task
+        except asyncio.CancelledError:
+            pass
+        timeout_sweeper_task = None
 
 
 # Ensure TestClient and direct imports have a usable state before startup hooks run.
@@ -498,6 +618,7 @@ def bot_public(bot: Bot) -> dict[str, Any]:
         "updated_at": bot.updated_at,
         "challenge_policy": bot.challenge_policy,
         "owner_review_timeout_sec": bot.owner_review_timeout_sec,
+        "game": bot.game,
     }
 
 
@@ -612,6 +733,7 @@ def challenge_public(ch: Challenge) -> dict[str, Any]:
         "opponent_bot_id": ch.opponent_bot_id,
         "opponent_name": bot_name(ch.opponent_bot_id),
         "challenger_side": ch.challenger_side,
+        "game": ch.game,
         "status": ch.status,
         "match_id": ch.match_id,
         "owner_decision": ch.owner_decision,
@@ -629,9 +751,50 @@ def bot_name(bot_id: str) -> str:
 
 
 def match_public(m: Match, include_legal_moves: bool = True) -> dict[str, Any]:
+    if m.game == "go":
+        state = go9.loads_state(m.fen)
+        turn = state["turn"]
+        turn_bot_id = m.black_bot_id if turn == go9.BLACK else m.red_bot_id
+        data = {
+            "match_id": m.id,
+            "game": m.game,
+            "red_bot_id": m.red_bot_id,
+            "red_bot_name": bot_name(m.red_bot_id),
+            "red_bot_avatar_url": (bots.get(m.red_bot_id).avatar_url if bots.get(m.red_bot_id) else "") or "",
+            "white_bot_id": m.red_bot_id,
+            "white_bot_name": bot_name(m.red_bot_id),
+            "white_bot_avatar_url": (bots.get(m.red_bot_id).avatar_url if bots.get(m.red_bot_id) else "") or "",
+            "black_bot_id": m.black_bot_id,
+            "black_bot_name": bot_name(m.black_bot_id),
+            "black_bot_avatar_url": (bots.get(m.black_bot_id).avatar_url if bots.get(m.black_bot_id) else "") or "",
+            "fen": m.fen,
+            "state_json": m.fen,
+            "state": state,
+            "board": state["board"],
+            "turn": turn,
+            "turn_bot_id": turn_bot_id,
+            "captures": state.get("captures", {}),
+            "passes": state.get("passes", 0),
+            "status": m.status,
+            "result": m.result,
+            "winner_bot_id": m.winner_bot_id,
+            "finish_reason": m.finish_reason,
+            "ply": m.ply,
+            "moves": m.moves,
+            "challenge_id": m.challenge_id,
+            "paused": m.paused,
+            "created_at": m.created_at,
+            "updated_at": m.updated_at,
+            "red_time_left_ms": m.red_time_left_ms,
+            "black_time_left_ms": m.black_time_left_ms,
+            "total_time_ms": m.total_time_ms,
+        }
+        return data
+
     _, turn, _, _ = parse_fen(m.fen)
     data = {
         "match_id": m.id,
+        "game": m.game,
         "red_bot_id": m.red_bot_id,
         "red_bot_name": bot_name(m.red_bot_id),
         "red_bot_avatar_url": (bots.get(m.red_bot_id).avatar_url if bots.get(m.red_bot_id) else "") or "",
@@ -680,15 +843,18 @@ def visible_matches() -> list[Match]:
     return [m for m in matches.values() if match_has_known_bots(m)]
 
 
-def active_match_for_bot(bot_id: str) -> Match | None:
+def active_match_for_bot(bot_id: str, game: str | None = None) -> Match | None:
+    game = normalize_game(game) if game else None
     for m in matches.values():
+        if game and m.game != game:
+            continue
         if m.status == "active" and bot_id in (m.red_bot_id, m.black_bot_id):
             return m
     return None
 
 
-def ensure_bot_available(bot_id: str) -> None:
-    m = active_match_for_bot(bot_id)
+def ensure_bot_available(bot_id: str, game: str | None = None) -> None:
+    m = active_match_for_bot(bot_id, game)
     if not m:
         return
     raise HTTPException(
@@ -698,6 +864,7 @@ def ensure_bot_available(bot_id: str) -> None:
             "message": "bot is already in an active match",
             "bot_id": bot_id,
             "match_id": m.id,
+            "game": m.game,
         },
     )
 
@@ -709,11 +876,12 @@ def remove_bot_from_queue(bot_id: str) -> None:
 
 
 def create_match_from_challenge(ch: Challenge) -> Match:
-    ensure_bot_available(ch.challenger_bot_id)
-    ensure_bot_available(ch.opponent_bot_id)
+    ensure_bot_available(ch.challenger_bot_id, ch.game)
+    ensure_bot_available(ch.opponent_bot_id, ch.game)
     red_id = ch.challenger_bot_id if ch.challenger_side == RED else ch.opponent_bot_id
     black_id = ch.opponent_bot_id if ch.challenger_side == RED else ch.challenger_bot_id
-    return Match(id=new_id("match"), red_bot_id=red_id, black_bot_id=black_id, challenge_id=ch.id)
+    fen = go9.initial_state_json() if ch.game == "go" else INITIAL_FEN
+    return Match(id=new_id("match"), red_bot_id=red_id, black_bot_id=black_id, fen=fen, challenge_id=ch.id, game=ch.game)
 
 
 def expire_challenge_if_needed(ch: Challenge, now: float | None = None) -> bool:
@@ -862,6 +1030,9 @@ async def emit_match_started(m: Match) -> None:
 
 
 def current_turn_bot_id(m: Match) -> str:
+    if m.game == "go":
+        state = go9.loads_state(m.fen)
+        return m.black_bot_id if state["turn"] == go9.BLACK else m.red_bot_id
     _, turn, _, _ = parse_fen(m.fen)
     return m.red_bot_id if turn == RED else m.black_bot_id
 
@@ -892,8 +1063,13 @@ async def emit_pending_challenges_for_bot(bot_id: str) -> int:
 async def emit_turn(m: Match) -> None:
     if m.status != "active" or m.paused:
         return
-    _, turn, _, _ = parse_fen(m.fen)
-    bot_id = m.red_bot_id if turn == RED else m.black_bot_id
+    if m.game == "go":
+        state = go9.loads_state(m.fen)
+        turn = state["turn"]
+        bot_id = m.black_bot_id if turn == go9.BLACK else m.red_bot_id
+    else:
+        _, turn, _, _ = parse_fen(m.fen)
+        bot_id = m.red_bot_id if turn == RED else m.black_bot_id
     await emit(bot_id, "your_turn", {**match_public(m), "side": turn})
 
 
@@ -917,10 +1093,11 @@ async def health() -> dict[str, str]:
 @app.post("/api/bots/register")
 async def register(req: RegisterReq) -> dict[str, Any]:
     policy = validate_challenge_policy(req.challenge_policy)
+    game = normalize_game(req.game)
     async with state_lock:
         now = time.time()
         bot = Bot(
-            id=new_id("bot"), name=req.name, token=secrets.token_urlsafe(32), created_at=now, updated_at=now,
+            id=new_id("bot"), name=req.name, token=secrets.token_urlsafe(32), created_at=now, updated_at=now, game=game,
             avatar_url=req.avatar_url, description=req.description, chess_style=req.chess_style or "random",
             persona_prompt=req.persona_prompt, engine_mode=req.engine_mode or "random", client_type=req.client_type or "astrbot",
             instance_name=req.instance_name, is_public=req.is_public, challenge_policy=policy,
@@ -929,7 +1106,7 @@ async def register(req: RegisterReq) -> dict[str, Any]:
         bots[bot.id] = bot
         tokens[bot.token] = bot.id
         save_bot(bot)
-    return {"bot_id": bot.id, "token": bot.token, "name": bot.name}
+    return {"bot_id": bot.id, "token": bot.token, "name": bot.name, "game": bot.game}
 
 
 @app.get("/api/bots/me")
@@ -954,11 +1131,13 @@ async def update_me(req: BotUpdateReq, bot: Bot = Depends(get_current_bot)) -> d
 async def list_bots(
     q: str = "",
     online_only: bool = False,
+    game: str = DEFAULT_GAME,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
     refresh_state_from_db()
-    items = [b for b in bots.values() if b.is_public and b.is_enabled]
+    game = normalize_game(game)
+    items = [b for b in bots.values() if b.is_public and b.is_enabled and b.game == game]
     if q:
         q_lower = q.lower()
         items = [b for b in items if q_lower in b.name.lower() or q_lower in (b.description or "").lower() or q_lower in (b.chess_style or "").lower()]
@@ -970,15 +1149,16 @@ async def list_bots(
 
 
 @app.get("/api/rankings")
-async def get_rankings(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+async def get_rankings(game: str = DEFAULT_GAME, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
     refresh_state_from_db()
+    game = normalize_game(game)
     with db_connect() as conn:
-        total = conn.execute("SELECT COUNT(*) AS c FROM rankings r JOIN bots b ON b.id = r.bot_id WHERE b.is_public = 1 AND b.is_enabled = 1").fetchone()["c"]
+        total = conn.execute("SELECT COUNT(*) AS c FROM rankings r JOIN bots b ON b.id = r.bot_id WHERE b.is_public = 1 AND b.is_enabled = 1 AND b.game = ?", (game,)).fetchone()["c"]
         rows = conn.execute(
             """SELECT r.*, b.name, b.avatar_url, b.online_status FROM rankings r JOIN bots b ON b.id = r.bot_id
-               WHERE b.is_public = 1 AND b.is_enabled = 1
+               WHERE b.is_public = 1 AND b.is_enabled = 1 AND b.game = ?
                ORDER BY r.rating DESC, r.wins DESC, r.games ASC, b.name ASC LIMIT ? OFFSET ?""",
-            (limit, offset),
+            (game, limit, offset),
         ).fetchall()
     rankings = []
     for i, row in enumerate(rows, start=offset + 1):
@@ -1187,9 +1367,12 @@ async def broadcast_match_sse(match_id: str) -> None:
 # ── Queue endpoints ──────────────────────────────────────────────
 
 @app.post("/api/queue/join")
-async def queue_join(request: Request, bot_id: str = Depends(x_bot_token)) -> dict[str, Any]:
+async def queue_join(request: Request, game: str = DEFAULT_GAME, bot_id: str = Depends(x_bot_token)) -> dict[str, Any]:
+    game = normalize_game(game)
     async with state_lock:
-        ensure_bot_available(bot_id)
+        ensure_bot_available(bot_id, game)
+        if bots[bot_id].game != game:
+            raise HTTPException(status_code=400, detail="bot game mismatch")
         # Reject if already in queue
         if bot_id in match_queue_entries:
             raise HTTPException(status_code=400, detail="already in queue")
@@ -1202,17 +1385,19 @@ async def queue_join(request: Request, bot_id: str = Depends(x_bot_token)) -> di
         # Insert into DB and in-memory dict
         with db_connect() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO match_queue(bot_id, rating, joined_at) VALUES(?, ?, ?)",
-                (bot_id, rating, now_iso),
+                "INSERT OR REPLACE INTO match_queue(bot_id, rating, joined_at, game) VALUES(?, ?, ?, ?)",
+                (bot_id, rating, now_iso, game),
             )
-        match_queue_entries[bot_id] = {"bot_id": bot_id, "rating": rating, "joined_at": now_iso}
+        match_queue_entries[bot_id] = {"bot_id": bot_id, "rating": rating, "joined_at": now_iso, "game": game}
 
         matched_bot_id: str | None = None
         matched_rating: int | None = None
         for other_id, entry in list(match_queue_entries.items()):
             if other_id == bot_id:
                 continue
-            if active_match_for_bot(other_id):
+            if entry.get("game", DEFAULT_GAME) != game:
+                continue
+            if active_match_for_bot(other_id, game):
                 remove_bot_from_queue(other_id)
                 continue
             other_rating = entry.get("rating", 1000)
@@ -1234,6 +1419,7 @@ async def queue_join(request: Request, bot_id: str = Depends(x_bot_token)) -> di
                 challenger_bot_id=bot_id,
                 opponent_bot_id=matched_bot_id,
                 challenger_side=choose_challenger_side(None),
+                game=game,
             )
             challenges[ch.id] = ch
             save_challenge(ch)
@@ -1260,12 +1446,14 @@ async def queue_join(request: Request, bot_id: str = Depends(x_bot_token)) -> di
                 "opponent_name": bot_name(matched_bot_id),
                 "opponent_rating": matched_rating,
                 "match": m_data,
+                "game": game,
             }
         else:
             return {
                 "matched": False,
                 "queue_count": len(match_queue_entries),
                 "message": "waiting for opponent",
+                "game": game,
             }
 
 
@@ -1281,27 +1469,34 @@ async def queue_leave(bot_id: str = Depends(x_bot_token)) -> dict[str, Any]:
 
 
 @app.get("/api/queue/status")
-async def queue_status() -> dict[str, Any]:
+async def queue_status(game: str | None = None) -> dict[str, Any]:
+    game = normalize_game(game) if game else None
     queue_list = []
     for bot_id, entry in match_queue_entries.items():
+        if game and entry.get("game", DEFAULT_GAME) != game:
+            continue
         queue_list.append({
             "bot_id": bot_id,
             "name": bot_name(bot_id),
             "rating": entry.get("rating", 1000),
             "joined_at": entry.get("joined_at", ""),
+            "game": entry.get("game", DEFAULT_GAME),
         })
     return {"queue": queue_list, "count": len(queue_list)}
 
 
 @app.post("/api/challenges")
 async def create_challenge(req: ChallengeReq, bot: Bot = Depends(get_current_bot)) -> dict[str, Any]:
+    game = normalize_game(req.game or bot.game)
     async with state_lock:
         if req.opponent_bot_id not in bots:
             raise HTTPException(status_code=404, detail="opponent bot not found")
         if req.opponent_bot_id == bot.id:
             raise HTTPException(status_code=400, detail="cannot challenge self")
-        ensure_bot_available(bot.id)
-        ensure_bot_available(req.opponent_bot_id)
+        if bot.game != game or bots[req.opponent_bot_id].game != game:
+            raise HTTPException(status_code=400, detail="bot game mismatch")
+        ensure_bot_available(bot.id, game)
+        ensure_bot_available(req.opponent_bot_id, game)
         opponent = bots[req.opponent_bot_id]
         now = time.time()
         ch = Challenge(
@@ -1310,6 +1505,7 @@ async def create_challenge(req: ChallengeReq, bot: Bot = Depends(get_current_bot
             opponent_bot_id=req.opponent_bot_id,
             challenger_side=choose_challenger_side(req.side),
             updated_at=now,
+            game=game,
         )
         if opponent.challenge_policy == "manual_approve":
             ch.status = "owner_review"
@@ -1426,9 +1622,11 @@ async def reject_challenge(challenge_id: str, bot: Bot = Depends(get_current_bot
 
 
 @app.get("/api/admin/matches")
-async def api_admin_matches(limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+async def api_admin_matches(game: str | None = None, limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
     refresh_state_from_db()
-    ordered = sorted(visible_matches(), key=lambda m: m.updated_at, reverse=True)
+    game = normalize_game(game) if game else None
+    source = [m for m in visible_matches() if not game or m.game == game]
+    ordered = sorted(source, key=lambda m: m.updated_at, reverse=True)
     page = ordered[offset : offset + limit]
     return {"total": len(ordered), "limit": limit, "offset": offset, "matches": [admin_match_summary(m) for m in page]}
 
@@ -1454,12 +1652,13 @@ async def api_admin_create_bot(req: AdminBotCreateReq, _: None = Depends(require
     if not token:
         raise HTTPException(status_code=400, detail="token cannot be empty")
     policy = validate_challenge_policy(req.challenge_policy)
+    game = normalize_game(req.game)
     async with state_lock:
         if token in tokens:
             raise HTTPException(status_code=409, detail="token already exists")
         now = time.time()
         bot = Bot(
-            id=new_id("bot"), name=req.name, token=token, created_at=now, updated_at=now,
+            id=new_id("bot"), name=req.name, token=token, created_at=now, updated_at=now, game=game,
             avatar_url=req.avatar_url, description=req.description, chess_style=req.chess_style or "random",
             persona_prompt=req.persona_prompt, engine_mode="random", client_type="astrbot",
             instance_name=None, is_public=req.is_public, is_enabled=req.is_enabled,
@@ -1686,12 +1885,84 @@ async def make_move(match_id: str, req: MoveReq, bot: Bot = Depends(get_current_
             raise HTTPException(status_code=400, detail="match not active")
         if m.paused:
             raise HTTPException(status_code=400, detail="match is paused")
-        _, turn, _, _ = parse_fen(m.fen)
-        expected_bot = m.red_bot_id if turn == RED else m.black_bot_id
-        if bot.id != expected_bot:
-            raise HTTPException(status_code=403, detail="not your turn")
+        if m.game == "go":
+            try:
+                state = go9.loads_state(m.fen)
+                turn = state["turn"]
+                expected_bot = m.black_bot_id if turn == go9.BLACK else m.red_bot_id
+                if bot.id != expected_bot:
+                    raise HTTPException(status_code=403, detail="not your turn")
+                old_state = m.fen
+                new_state, move_info = go9.apply_move(m.fen, req.move)
+            except go9.GoRuleError as e:
+                err = {"message": str(e), "match_id": match_id, "move": req.move}
+                await emit(bot.id, "error", err)
+                raise HTTPException(status_code=400, detail=str(e))
+            m.fen = new_state
+            m.ply += 1
+            now = time.time()
+            if m.ply == 1:
+                m.started_at = now
+            m.last_move_at = now
+            m.updated_at = now
+            captured = move_info.get("captured") or []
+            move_rec = {
+                "move_id": new_id("move"),
+                "ply": m.ply,
+                "bot_id": bot.id,
+                "side": turn,
+                "move": move_info.get("move", req.move),
+                "comment": req.comment,
+                "bot_speech": req.comment,
+                "duration_ms": req.duration_ms,
+                "fen_before": old_state,
+                "fen_after": new_state,
+                "state_before": old_state,
+                "state_after": new_state,
+                "captured": captured,
+                "captured_count": len(captured),
+                "check": False,
+                "created_at": m.updated_at,
+                "red_time_left_ms": m.red_time_left_ms,
+                "black_time_left_ms": m.black_time_left_ms,
+            }
+            m.moves.append(move_rec)
+            new_state_obj = go9.loads_state(new_state)
+            if move_info.get("finished"):
+                m.status = "finished"
+                m.result = new_state_obj.get("result") or "draw"
+                winner = new_state_obj.get("winner")
+                m.winner_bot_id = m.black_bot_id if winner == go9.BLACK else (m.red_bot_id if winner == go9.WHITE else None)
+                m.finish_reason = new_state_obj.get("finish_reason") or "double_pass"
+                m.finished_at = now
+            save_match(m)
+            if m.status == "finished":
+                update_rankings_for_finished_match(m)
+            data = {"match": match_public(m), "move": move_rec}
+            participants = [m.red_bot_id, m.black_bot_id]
+            for pid in participants:
+                await emit(pid, "move_made", data)
+            if m.status == "finished":
+                for pid in participants:
+                    await emit(pid, "match_finished", match_public(m))
+            else:
+                await emit_turn(m)
+            await broadcast_match_sse(match_id)
+            return data
+        else:
+            _, turn, _, _ = parse_fen(m.fen)
+            expected_bot = m.red_bot_id if turn == RED else m.black_bot_id
+            if bot.id != expected_bot:
+                raise HTTPException(status_code=403, detail="not your turn")
         # ── Timer: track elapsed time ──
         now = time.time()
+        timeout_data = await finish_timeout_match_locked(m, now)
+        if timeout_data:
+            participants = [m.red_bot_id, m.black_bot_id]
+            for pid in participants:
+                await emit(pid, "match_finished", timeout_data["match"])
+            await broadcast_match_sse(match_id)
+            return timeout_data
         if m.ply == 0:
             m.started_at = now
             m.last_move_at = now
@@ -1702,21 +1973,6 @@ async def make_move(match_id: str, req: MoveReq, bot: Bot = Depends(get_current_
             else:
                 m.black_time_left_ms = max(0, m.black_time_left_ms - elapsed_ms)
             m.last_move_at = now
-            # Timeout check
-            if (turn == RED and m.red_time_left_ms <= 0) or (turn == BLACK and m.black_time_left_ms <= 0):
-                m.status = "finished"
-                m.result = f"{'black' if turn == RED else 'red'}_win"
-                m.winner_bot_id = m.black_bot_id if turn == RED else m.red_bot_id
-                m.finish_reason = "timeout"
-                m.finished_at = now
-                save_match(m)
-                update_rankings_for_finished_match(m)
-                data = {"match": match_public(m), "timeout": True, "side": turn}
-                participants = [m.red_bot_id, m.black_bot_id]
-                for pid in participants:
-                    await emit(pid, "match_finished", match_public(m))
-                await broadcast_match_sse(match_id)
-                return data
         try:
             new_fen, captured, finished = apply_ucci(m.fen, req.move)
         except RuleError as e:

@@ -7,9 +7,9 @@ function authHeaders(){const c=cfg();const t=(c.adminToken||c.token||'').trim();
 function hasAdminToken(){return !!(cfg().adminToken||'').trim()}
 function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 let cachedRedName='',cachedBlackName='',matchPaused=false;
-let cachedRedAvatar='',cachedBlackAvatar='';
-let capturedByRed=[]; // pieces red has captured (black pieces)
-let capturedByBlack=[]; // pieces black has captured (red pieces)
+let cachedRedAvatar='',cachedBlackAvatar='',currentGame='xiangqi',currentMatch=null;
+let capturedByRed=[]; // xiangqi: pieces red has captured; go: white captures
+let capturedByBlack=[]; // xiangqi/go: black captures
 
 // ── Avatar helpers ──
 function avatarGradient(name){
@@ -30,31 +30,47 @@ function renderAvatarEl(el,name,avatarUrl,cls){
     el.textContent=(name||'?').slice(0,1);
   }
 }
-async function load(){const r=await fetch(`/api/admin/matches/${matchId}`); if(!r.ok)throw new Error(await r.text()); const m=await r.json(); cachedRedName=m.red_bot_name; cachedBlackName=m.black_bot_name; cachedRedAvatar=m.red_bot_avatar_url||''; cachedBlackAvatar=m.black_bot_avatar_url||''; matchPaused=!!m.paused; capturedByRed=[]; capturedByBlack=[]; (m.moves||[]).forEach(function(mv){if(mv.captured){if(mv.side==='red')capturedByRed.push(mv.captured);else capturedByBlack.push(mv.captured);}}); render(m); if(typeof markAudioStateLoaded==='function')markAudioStateLoaded(m.ply||0)}
+async function load(){const r=await fetch(`/api/admin/matches/${matchId}`); if(!r.ok)throw new Error(await r.text()); const m=await r.json(); currentGame=m.game||'xiangqi'; currentMatch=m; cachedRedName=m.red_bot_name; cachedBlackName=m.black_bot_name; cachedRedAvatar=m.red_bot_avatar_url||''; cachedBlackAvatar=m.black_bot_avatar_url||''; matchPaused=!!m.paused; rebuildCapturedFromMoves(m.moves||[]); render(m); if(typeof markAudioStateLoaded==='function')markAudioStateLoaded(m.ply||0)}
 function render(m){
+  currentGame=m.game||'xiangqi'; currentMatch=m;
   $('#matchStatus').textContent=`${m.status} · ${m.result||'进行中'} · ${m.ply}手`; $('#updatedAt').textContent=' · '+new Date((m.updated_at||0)*1000).toLocaleString();
+  const redSide=$('.player.red .side-name'), blackSide=$('.player.black .side-name');
+  if(redSide)redSide.textContent=currentGame==='go'?'白方':'红方';
+  if(blackSide)blackSide.textContent='黑方';
   $('#redName').textContent=m.red_bot_name||m.red_bot_id; $('#redId').textContent=m.red_bot_id; $('#blackName').textContent=m.black_bot_name||m.black_bot_id; $('#blackId').textContent=m.black_bot_id;
-  renderAvatarEl($('#redAvatar'),m.red_bot_name||'帅',m.red_bot_avatar_url,'big'); renderAvatarEl($('#blackAvatar'),m.black_bot_name||'将',m.black_bot_avatar_url,'big dark');
+  renderAvatarEl($('#redAvatar'),m.red_bot_name||(currentGame==='go'?'白':'帅'),m.red_bot_avatar_url,'big'); renderAvatarEl($('#blackAvatar'),m.black_bot_name||'黑',m.black_bot_avatar_url,'big dark');
   matchPaused=!!m.paused;
   updateTurnBannerContent(m.status,m.turn,m.ply,m.paused,m.result,m.red_bot_name,m.black_bot_name);
   if(!isReplayLocked()){
-    $('#fenText').textContent=m.fen; renderBoard(m.fen); renderCaptured();
+    if(currentGame==='go'){$('#fenText').textContent=m.state_json||m.fen||''; renderGoBoard(m.board||(m.state&&m.state.board));}
+    else{$('#fenText').textContent=m.fen; renderBoard(m.fen);}
+    renderCaptured();
   }
   renderMoves(m);
 }
+function sideText(side){
+  if(currentGame==='go')return side==='white'||side==='red'?'白方':'黑方';
+  return side==='red'?'红方':'黑方';
+}
+function sideName(side,redName,blackName){
+  return (currentGame==='go'?(side==='white'||side==='red'?redName:blackName):(side==='red'?redName:blackName))||sideText(side);
+}
+function normalizeMoveSide(side){return currentGame==='go'&&side==='white'?'red':side;}
+function flattenCaptured(v){if(!v)return[]; return Array.isArray(v)?v.flatMap(flattenCaptured):[v];}
+function rebuildCapturedFromMoves(moves){capturedByRed=[]; capturedByBlack=[]; (moves||[]).forEach(function(mv){const arr=flattenCaptured(mv.captured); if(!arr.length)return; if(normalizeMoveSide(mv.side)==='red')capturedByRed.push(...arr);else capturedByBlack.push(...arr);});}
 function updateTurnBannerContent(status,turn,ply,paused,result,redName,blackName){
   if(status==='active'){
     if(paused){
       $('#turnBanner').textContent='⏸ 对局已暂停';
     }else{
-      $('#turnBanner').textContent=`轮到${turn==='red'?'红方':'黑方'}：${turn==='red'?redName:blackName}`;
+      $('#turnBanner').textContent=`轮到${sideText(turn)}：${sideName(turn,redName,blackName)}`;
     }
   }else{
     $('#turnBanner').textContent=`对局已结束：${result||status}`;
   }
 }
 function renderBoard(fen){
-  const board=$('#board'); board.innerHTML=''; const pieceMap={}; const layout=fen.split(' ')[0]; let row=0,col=0;
+  const board=$('#board'); board.className='xiangqi-board'; board.setAttribute('aria-label','中文象棋棋盘'); board.innerHTML=''; const pieceMap={}; const layout=fen.split(' ')[0]; let row=0,col=0;
   for(const ch of layout){ if(ch==='/'){row++;col=0;continue} if(/\d/.test(ch)){col+=Number(ch);continue} pieceMap[`${row},${col}`]=ch; col++; }
   // Cannon/pawn starting position markers (row -> [cols])
   const markerRows={2:[1,7],7:[1,7],3:[0,2,4,6,8],6:[0,2,4,6,8]};
@@ -99,7 +115,29 @@ function renderBoard(fen){
     }
   }
 }
+function renderGoBoard(goBoard){
+  const board=$('#board'); board.className='go-board'; board.setAttribute('aria-label','9路围棋棋盘'); board.innerHTML='';
+  const grid=goBoard||Array.from({length:9},()=>Array(9).fill(null));
+  for(let r=0;r<9;r++)for(let c=0;c<9;c++){
+    const cell=document.createElement('div'); cell.className='go-point';
+    if(c===0)cell.classList.add('edge-l'); if(c===8)cell.classList.add('edge-r'); if(r===0)cell.classList.add('edge-t'); if(r===8)cell.classList.add('edge-b');
+    if((r===2||r===6)&&(c===2||c===6)||(r===4&&c===4)){const star=document.createElement('span'); star.className='go-star'; cell.appendChild(star);}
+    if(r===8){const fl=document.createElement('span'); fl.className='go-coord go-file'; fl.textContent='abcdefghi'[c]; cell.appendChild(fl);}
+    if(c===8){const rl=document.createElement('span'); rl.className='go-coord go-rank'; rl.textContent=String(9-r); cell.appendChild(rl);}
+    const v=grid[r]&&grid[r][c];
+    if(v){const stone=document.createElement('div'); stone.className='go-stone '+(v==='white'?'white':'black'); stone.title='abcdefghi'[c]+(9-r); cell.appendChild(stone);}
+    board.appendChild(cell);
+  }
+}
 function renderCaptured(){
+  if(currentGame==='go'){
+    const caps=(currentMatch&&currentMatch.captures)||{};
+    const whiteN=caps.white!=null?caps.white:capturedByRed.length;
+    const blackN=caps.black!=null?caps.black:capturedByBlack.length;
+    const rc=$('#redCaptured'); if(rc)rc.innerHTML='<span class="captured-label">白方提子：</span><span class="go-capture-count">'+esc(whiteN)+'</span>';
+    const bc=$('#blackCaptured'); if(bc)bc.innerHTML='<span class="captured-label">黑方提子：</span><span class="go-capture-count">'+esc(blackN)+'</span>';
+    return;
+  }
   function makeIcons(pieces,cls){
     return pieces.map(p=>{
       const el=document.createElement('span');
@@ -115,15 +153,16 @@ function moveAvatarHtml(name,avatarUrl){
   if(avatarUrl){return `<img class="move-avatar-img" src="${esc(avatarUrl)}" alt="${esc(name)}" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex'"><span class="move-avatar-txt" style="display:none;background:${avatarGradient(name)}">${esc((name||'?').slice(0,1))}</span>`;}
   return `<span class="move-avatar-txt" style="background:${avatarGradient(name)}">${esc((name||'?').slice(0,1))}</span>`;
 }
+function capturedText(mv){const arr=flattenCaptured(mv.captured); if(!arr.length)return''; return currentGame==='go'?` · 提 ${arr.length}子`:` · 吃 ${esc(names[arr[0]]||arr[0])}`;}
 function renderMovesFromSSE(moves,last){
   const box=$('#moves'); if(!moves||!moves.length){box.innerHTML='<p class="muted">暂无走法，等待 Bot 出招。</p>';return}
-  box.innerHTML=moves.slice().reverse().map(mv=>{const name=mv.side==='red'?(cachedRedName||'红方'):(cachedBlackName||'黑方');const avUrl=mv.side==='red'?cachedRedAvatar:cachedBlackAvatar;const avHtml=moveAvatarHtml(name,avUrl); const line=mv.comment||'（没有台词）'; return `<div class="move"><b>#${esc(mv.ply)} ${mv.side==='red'?'红':'黑'} ${esc(name)}</b><br><code>${esc(mv.move)}</code>${mv.captured?` · 吃 ${esc(names[mv.captured]||mv.captured)}`:''}<p class="comment">${avHtml} ${esc(line)}</p></div>`}).join('');
-  if(last){ if(last.side==='red')$('#redLine').textContent=last.comment||'刚走了一步。'; else $('#blackLine').textContent=last.comment||'刚走了一步。'; }
+  box.innerHTML=moves.slice().reverse().map(mv=>{const side=normalizeMoveSide(mv.side);const name=side==='red'?(cachedRedName||sideText(mv.side)):(cachedBlackName||'黑方');const avUrl=side==='red'?cachedRedAvatar:cachedBlackAvatar;const avHtml=moveAvatarHtml(name,avUrl); const line=mv.comment||'（没有台词）'; return `<div class="move"><b>#${esc(mv.ply)} ${esc(sideText(mv.side))} ${esc(name)}</b><br><code>${esc(mv.move)}</code>${capturedText(mv)}<p class="comment">${avHtml} ${esc(line)}</p></div>`}).join('');
+  if(last){ if(normalizeMoveSide(last.side)==='red')$('#redLine').textContent=last.comment||'刚走了一步。'; else $('#blackLine').textContent=last.comment||'刚走了一步。'; }
 }
 function renderMoves(m){
   const box=$('#moves'); const moves=m.moves||[]; if(!moves.length){box.innerHTML='<p class="muted">暂无走法，等待 Bot 出招。</p>';return}
-  box.innerHTML=moves.slice().reverse().map(mv=>{const name=mv.side==='red'?m.red_bot_name:m.black_bot_name;const avUrl=mv.side==='red'?m.red_bot_avatar_url:m.black_bot_avatar_url;const avHtml=moveAvatarHtml(name,avUrl); const line=mv.comment||'（没有台词）'; return `<div class="move"><b>#${esc(mv.ply)} ${mv.side==='red'?'红':'黑'} ${esc(name)}</b><br><code>${esc(mv.move)}</code>${mv.captured?` · 吃 ${esc(names[mv.captured]||mv.captured)}`:''}<p class="comment">${avHtml} ${esc(line)}</p></div>`}).join('');
-  const last=moves[moves.length-1]; if(last){ if(last.side==='red')$('#redLine').textContent=last.comment||'刚走了一步。'; else $('#blackLine').textContent=last.comment||'刚走了一步。'; }
+  box.innerHTML=moves.slice().reverse().map(mv=>{const side=normalizeMoveSide(mv.side);const name=side==='red'?m.red_bot_name:m.black_bot_name;const avUrl=side==='red'?m.red_bot_avatar_url:m.black_bot_avatar_url;const avHtml=moveAvatarHtml(name,avUrl); const line=mv.comment||'（没有台词）'; return `<div class="move"><b>#${esc(mv.ply)} ${esc(sideText(mv.side))} ${esc(name)}</b><br><code>${esc(mv.move)}</code>${capturedText(mv)}<p class="comment">${avHtml} ${esc(line)}</p></div>`}).join('');
+  const last=moves[moves.length-1]; if(last){ if(normalizeMoveSide(last.side)==='red')$('#redLine').textContent=last.comment||'刚走了一步。'; else $('#blackLine').textContent=last.comment||'刚走了一步。'; }
 }
 function updateStatusFromSSE(status,result,ply,paused){
   $('#matchStatus').textContent=`${status} · ${result||'进行中'} · ${ply}手`;
@@ -136,8 +175,8 @@ function updateStatusFromSSE(status,result,ply,paused){
 }
 function updateTurnBanner(ply,paused,turn){
   if(paused){$('#turnBanner').textContent='⏸ 对局已暂停'; return;}
-  turn=turn||(ply%2===0?'red':'black');
-  $('#turnBanner').textContent=`轮到${turn==='red'?'红方':'黑方'}：${turn==='red'?cachedRedName:cachedBlackName}`;
+  turn=turn||(ply%2===0?(currentGame==='go'?'black':'red'):'black');
+  $('#turnBanner').textContent=`轮到${sideText(turn)}：${sideName(turn,cachedRedName,cachedBlackName)}`;
 }
 async function stopMatch(){
   if(!confirm('确定停止这局吗？停止后双方 Bot 不会继续下。')) return;
@@ -183,8 +222,8 @@ function connectSSE(){
         const d=JSON.parse(e.data);
         const renderSSEState=function(){
           // Core rendering must never be broken by optional audio/popup features.
-          if(d.fen&&!isReplayLocked()){
-            try{renderBoard(d.fen); $('#fenText').textContent=d.fen;}catch(boardErr){console.error('board render error',boardErr)}
+          if(!isReplayLocked()){
+            try{currentGame=d.game||currentGame; currentMatch=d; if(currentGame==='go'){renderGoBoard(d.board||(d.state&&d.state.board)); $('#fenText').textContent=d.state_json||d.fen||'';} else if(d.fen){renderBoard(d.fen); $('#fenText').textContent=d.fen;}}catch(boardErr){console.error('board render error',boardErr)}
           }
           if(d.status!=null&&d.ply!=null){
             try{
@@ -199,8 +238,7 @@ function connectSSE(){
             try{
               renderMovesFromSSE(d.moves,d.last_move||d.moves[d.moves.length-1]);
               // Rebuild captured lists from moves
-              capturedByRed=[]; capturedByBlack=[];
-              (d.moves||[]).forEach(function(mv){if(mv.captured){if(mv.side==='red')capturedByRed.push(mv.captured);else capturedByBlack.push(mv.captured);}});
+              rebuildCapturedFromMoves(d.moves||[]);
               if(!isReplayLocked())renderCaptured();
             }catch(movesErr){console.error('moves render error',movesErr)}
           }
@@ -338,7 +376,7 @@ function updateReplayUI(){
   $('#replayInfo').textContent=(replayStep+1)+' / '+total+' 步';
   if(replayStep>=0&&replayStep<allMoves.length){
     const mv=allMoves[replayStep];
-    const side=mv.side==='red'?'红':'黑';
+    const side=sideText(mv.side);
     $('#replayMoveLabel').textContent='#'+mv.ply+' '+side+' '+mv.move;
   }else if(replayStep===-1){
     $('#replayMoveLabel').textContent='初始局面';
@@ -370,15 +408,15 @@ function updateReplayBoard(){
   }else{
     fen=fenHistory[fenHistory.length-1];
   }
-  renderBoard(fen);
-  $('#fenText').textContent=fen;
+  if(currentGame==='go'){try{const st=JSON.parse(fen);renderGoBoard(st.board);$('#fenText').textContent=fen;}catch(e){renderGoBoard();}}
+  else{renderBoard(fen);$('#fenText').textContent=fen;}
   // Update captured pieces for the replay position
   const capturedR=[],capturedB=[];
   for(let i=0;i<=replayStep&&i<allMoves.length;i++){
     const mv=allMoves[i];
     if(mv.captured){
-      if(mv.side==='red')capturedR.push(mv.captured);
-      else capturedB.push(mv.captured);
+      if(normalizeMoveSide(mv.side)==='red')capturedR.push(...flattenCaptured(mv.captured));
+      else capturedB.push(...flattenCaptured(mv.captured));
     }
   }
   // Quick render captured
@@ -388,8 +426,8 @@ function updateReplayBoard(){
       return '<span class="captured-icon '+(p===p.toUpperCase()?'red':'black')+'">'+ch+'</span>';
     }).join('');
   }
-  const rc=$('#redCaptured'); if(rc)rc.innerHTML='<span class="captured-label">红方吃子：</span>'+makeIcons(capturedR,'black');
-  const bc=$('#blackCaptured'); if(bc)bc.innerHTML='<span class="captured-label">黑方吃子：</span>'+makeIcons(capturedB,'red');
+  if(currentGame==='go'){const rc=$('#redCaptured'); if(rc)rc.innerHTML='<span class="captured-label">白方提子：</span><span class="go-capture-count">'+capturedR.length+'</span>'; const bc=$('#blackCaptured'); if(bc)bc.innerHTML='<span class="captured-label">黑方提子：</span><span class="go-capture-count">'+capturedB.length+'</span>'; }
+  else{const rc=$('#redCaptured'); if(rc)rc.innerHTML='<span class="captured-label">红方吃子：</span>'+makeIcons(capturedR,'black'); const bc=$('#blackCaptured'); if(bc)bc.innerHTML='<span class="captured-label">黑方吃子：</span>'+makeIcons(capturedB,'red');}
 }
 function goToStep(n){
   replayStep=Math.max(-1,Math.min(allMoves.length-1,n));
