@@ -20,7 +20,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from .engine import BLACK, INITIAL_FEN, RED, RuleError, apply_ucci, is_in_check, legal_moves, parse_fen
-from .games import go9
+from .games import doudizhu, go9
+from . import card_rooms
 
 DB_PATH = Path(os.environ.get("CHESS_ARENA_DB", "/mnt/cosmem/gulu1-1415708756/chess-arena/chess_arena.db"))
 BASE_DIR = Path(__file__).resolve().parent
@@ -120,6 +121,8 @@ matches: dict[str, Match] = {}
 subscribers: dict[str, set[asyncio.Queue]] = {}
 match_sse_queues: dict[str, set[asyncio.Queue]] = {}
 match_queue_entries: dict[str, dict[str, Any]] = {}  # bot_id -> {bot_id, rating, joined_at}
+# Legacy /api/cards/doudizhu/demo cache only; formal CardRoom uses SQLite via card_rooms.py.
+doudizhu_demo_rooms: dict[str, str] = {}
 state_lock = asyncio.Lock()
 timeout_sweeper_task: asyncio.Task | None = None
 
@@ -176,6 +179,71 @@ class MoveReq(BaseModel):
 class AnalyzeReq(BaseModel):
     fen: str
     depth: int = 3
+
+
+class Go9AnalyzeReq(BaseModel):
+    fen: str | None = None
+    state: str | dict[str, Any] | None = None
+    match_id: str | None = None
+    legal_moves: list[str] | None = None
+    depth: int = Field(default=1, ge=1, le=8)
+
+
+class CardRoomCreateReq(BaseModel):
+    game: str = "doudizhu"
+    players: list[str] = Field(default_factory=lambda: ["seat0", "seat1", "seat2"], min_length=3, max_length=3)
+    seed: int | None = None
+    landlord_index: int = Field(default=0, ge=0, le=2)
+
+
+class CardActionReq(BaseModel):
+    player: str
+    action: str = Field(min_length=4, max_length=200)
+
+
+class CardRoomActionReq(BaseModel):
+    seat: int | str = 0
+    action: str = Field(min_length=4, max_length=20)
+    cards: list[str] = Field(default_factory=list)
+    source: str | None = Field(default=None, max_length=80)
+    reason: str | None = Field(default=None, max_length=500)
+    speech: str | None = Field(default=None, max_length=300)
+    retries: int | None = Field(default=None, ge=0, le=5)
+    token: str | None = Field(default=None, max_length=200)
+
+
+class CardRoomPromptCandidateReq(BaseModel):
+    action: str = Field(min_length=4, max_length=20)
+    cards: list[str] = Field(default_factory=list)
+    reason: str | None = Field(default=None, max_length=500)
+    speech: str | None = Field(default=None, max_length=300)
+
+
+class CardRoomPromptDecisionReq(BaseModel):
+    seat: int | str = 0
+    candidates: list[CardRoomPromptCandidateReq] = Field(default_factory=list, max_length=6)
+    source: str = Field(default="prompt_review", max_length=80)
+    max_retries: int = Field(default=5, ge=0, le=5)
+    token: str | None = Field(default=None, max_length=200)
+
+
+class CardRoomPoolJoinReq(BaseModel):
+    controller_type: str = Field(default="web", min_length=1, max_length=40)
+    controller_id: str = Field(min_length=1, max_length=160)
+    display_name: str | None = Field(default=None, max_length=80)
+
+
+class CardRoomPoolTokenJoinReq(BaseModel):
+    token: str = Field(min_length=1, max_length=200)
+    display_name: str | None = Field(default=None, max_length=80)
+
+
+class CardRoomPoolStartReq(BaseModel):
+    seed: int | None = None
+
+
+class CardAutoRunReq(BaseModel):
+    max_steps: int = Field(default=20, ge=1, le=200)
 
 
 class AdminBotCreateReq(BaseModel):
@@ -251,6 +319,19 @@ def init_db() -> None:
                 streak INTEGER DEFAULT 0,
                 updated_at REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS bot_game_profiles (
+                bot_id TEXT NOT NULL,
+                game TEXT NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                engine_mode TEXT,
+                persona_prompt TEXT,
+                created_at REAL,
+                updated_at REAL,
+                PRIMARY KEY(bot_id, game)
+            );
+            CREATE INDEX IF NOT EXISTS idx_bot_game_profiles_game_enabled ON bot_game_profiles(game, enabled);
+            CREATE INDEX IF NOT EXISTS idx_bot_game_profiles_bot ON bot_game_profiles(bot_id);
 
             CREATE TABLE IF NOT EXISTS rating_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -331,6 +412,12 @@ def init_db() -> None:
         conn.execute("UPDATE bots SET owner_review_timeout_sec = COALESCE(owner_review_timeout_sec, 180)")
         conn.execute("UPDATE challenges SET updated_at = COALESCE(updated_at, created_at, ?)", (now,))
         conn.execute("INSERT OR IGNORE INTO rankings(bot_id, rating, games, wins, losses, draws, win_rate, streak, updated_at) SELECT id, 1000, 0, 0, 0, 0, 0, 0, ? FROM bots", (now,))
+        conn.execute(
+            """INSERT OR IGNORE INTO bot_game_profiles(bot_id, game, enabled, engine_mode, persona_prompt, created_at, updated_at)
+               SELECT id, COALESCE(NULLIF(game, ''), ?), COALESCE(is_enabled, 1), engine_mode, persona_prompt, COALESCE(created_at, ?), COALESCE(updated_at, created_at, ?)
+               FROM bots""",
+            (DEFAULT_GAME, now, now),
+        )
 
 
 def ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
@@ -429,7 +516,13 @@ def save_bot(bot: Bot) -> None:
                  challenge_policy=excluded.challenge_policy, owner_review_timeout_sec=excluded.owner_review_timeout_sec, game=excluded.game""",
             (bot.id, bot.name, bot.token, bot.created_at, bot.avatar_url, bot.description, bot.chess_style, bot.persona_prompt, bot.engine_mode, bot.client_type, bot.instance_name, int(bot.is_public), int(bot.is_enabled), bot.online_status, bot.last_seen_at, bot.updated_at, bot.challenge_policy, bot.owner_review_timeout_sec, bot.game),
         )
-        conn.execute("INSERT OR IGNORE INTO rankings(bot_id, rating, games, wins, losses, draws, win_rate, streak, updated_at) VALUES(?, 1000, 0, 0, 0, 0, 0, 0, ?)", (bot.id, time.time()))
+        now = time.time()
+        conn.execute("INSERT OR IGNORE INTO rankings(bot_id, rating, games, wins, losses, draws, win_rate, streak, updated_at) VALUES(?, 1000, 0, 0, 0, 0, 0, 0, ?)", (bot.id, now))
+        conn.execute(
+            """INSERT OR IGNORE INTO bot_game_profiles(bot_id, game, enabled, engine_mode, persona_prompt, created_at, updated_at)
+               VALUES(?, ?, ?, ?, ?, ?, ?)""",
+            (bot.id, bot.game or DEFAULT_GAME, int(bot.is_enabled), bot.engine_mode, bot.persona_prompt, bot.created_at, now),
+        )
 
 
 def save_challenge(ch: Challenge) -> None:
@@ -595,8 +688,82 @@ async def shutdown_timeout_sweeper() -> None:
 load_state_from_db()
 
 
+def doudizhu_room_public(room_id: str, raw: str) -> dict[str, Any]:
+    state = doudizhu.loads_state(raw)
+    hands = state.get("hands") or {}
+    players = list(state.get("players") or [])
+    return {
+        "room_id": room_id,
+        "state": state,
+        "phase": state.get("phase"),
+        "current_player": state.get("current_player"),
+        "winner": state.get("winner"),
+        "hand_counts": {player: len(hands.get(player, [])) for player in players},
+    }
+
+
+def get_doudizhu_demo_room(room_id: str) -> str:
+    raw = doudizhu_demo_rooms.get(room_id)
+    if not raw:
+        raise HTTPException(status_code=404, detail="doudizhu demo room not found")
+    return raw
+
+
 def new_id(prefix: str) -> str:
     return f"{prefix}_{secrets.token_urlsafe(10)}"
+
+
+def normalize_profile_game(game: str | None) -> str:
+    value = (game or DEFAULT_GAME).strip().lower()
+    if value == "doudizhu":
+        return value
+    return normalize_game(value)
+
+
+def enabled_games_for_bot(bot_id: str) -> list[str]:
+    legacy_game = bots.get(bot_id).game if bot_id in bots else DEFAULT_GAME
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT game FROM bot_game_profiles WHERE bot_id = ? AND COALESCE(enabled, 1) = 1 ORDER BY CASE game WHEN 'xiangqi' THEN 0 WHEN 'go' THEN 1 WHEN 'doudizhu' THEN 2 ELSE 9 END, game",
+            (bot_id,),
+        ).fetchall()
+    games = [row["game"] for row in rows]
+    if games:
+        return games
+    return [legacy_game or DEFAULT_GAME]
+
+
+def bot_supports_game(bot_id: str, game: str) -> bool:
+    game = normalize_profile_game(game)
+    if bot_id not in bots:
+        return False
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT enabled FROM bot_game_profiles WHERE bot_id = ? AND game = ?",
+            (bot_id, game),
+        ).fetchone()
+    if row is not None:
+        return bool(row["enabled"])
+    return bots[bot_id].game == game
+
+
+def ensure_bot_game_profile(bot_id: str, game: str, enabled: bool = True, engine_mode: str | None = None, persona_prompt: str | None = None) -> None:
+    game = normalize_profile_game(game)
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail="bot not found")
+    bot = bots[bot_id]
+    now = time.time()
+    with db_connect() as conn:
+        conn.execute(
+            """INSERT INTO bot_game_profiles(bot_id, game, enabled, engine_mode, persona_prompt, created_at, updated_at)
+               VALUES(?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(bot_id, game) DO UPDATE SET
+                 enabled=excluded.enabled,
+                 engine_mode=COALESCE(excluded.engine_mode, bot_game_profiles.engine_mode),
+                 persona_prompt=COALESCE(excluded.persona_prompt, bot_game_profiles.persona_prompt),
+                 updated_at=excluded.updated_at""",
+            (bot_id, game, int(enabled), engine_mode if engine_mode is not None else bot.engine_mode, persona_prompt if persona_prompt is not None else bot.persona_prompt, now, now),
+        )
 
 
 def bot_public(bot: Bot) -> dict[str, Any]:
@@ -619,6 +786,7 @@ def bot_public(bot: Bot) -> dict[str, Any]:
         "challenge_policy": bot.challenge_policy,
         "owner_review_timeout_sec": bot.owner_review_timeout_sec,
         "game": bot.game,
+        "enabled_games": enabled_games_for_bot(bot.id),
     }
 
 
@@ -656,6 +824,7 @@ def delete_bot_from_db(bot_id: str) -> None:
         conn.execute("DELETE FROM matches WHERE red_bot_id = ? OR black_bot_id = ?", (bot_id, bot_id))
         conn.execute("DELETE FROM challenges WHERE challenger_bot_id = ? OR opponent_bot_id = ?", (bot_id, bot_id))
         conn.execute("DELETE FROM match_queue WHERE bot_id = ?", (bot_id,))
+        conn.execute("DELETE FROM bot_game_profiles WHERE bot_id = ?", (bot_id,))
         conn.execute("DELETE FROM rating_history WHERE bot_id = ?", (bot_id,))
         conn.execute("DELETE FROM rankings WHERE bot_id = ?", (bot_id,))
         conn.execute("DELETE FROM bots WHERE id = ?", (bot_id,))
@@ -789,6 +958,10 @@ def match_public(m: Match, include_legal_moves: bool = True) -> dict[str, Any]:
             "black_time_left_ms": m.black_time_left_ms,
             "total_time_ms": m.total_time_ms,
         }
+        if include_legal_moves and m.status == "active":
+            moves = go9.legal_moves(state)
+            data["legal_moves"] = moves
+            data["legal_actions"] = moves
         return data
 
     _, turn, _, _ = parse_fen(m.fen)
@@ -1009,6 +1182,27 @@ async def get_current_bot(token: str = Depends(bearer_token)) -> Bot:
     return bots[bot_id]
 
 
+def bot_from_plain_token(token: str | None) -> Bot:
+    value = (token or "").strip()
+    if not value:
+        raise HTTPException(status_code=401, detail="未登录：请先输入 Bot Token")
+    bot_id = tokens.get(value)
+    if not bot_id or bot_id not in bots:
+        raise HTTPException(status_code=401, detail="未登录：Bot Token 无效")
+    bot = bots[bot_id]
+    if not bot.is_enabled:
+        raise HTTPException(status_code=403, detail="该 Bot 已停用，不能入座斗地主")
+    return bot
+
+
+def card_room_token_join_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload)
+    seat = out.get("seat")
+    if isinstance(seat, dict):
+        out["seat"] = {key: value for key, value in seat.items() if key != "token"}
+    return out
+
+
 async def emit(bot_id: str, event: str, data: dict[str, Any]) -> None:
     payload = {"event": event, "data": data, "ts": time.time()}
     for q in list(subscribers.get(bot_id, set())):
@@ -1106,7 +1300,8 @@ async def register(req: RegisterReq) -> dict[str, Any]:
         bots[bot.id] = bot
         tokens[bot.token] = bot.id
         save_bot(bot)
-    return {"bot_id": bot.id, "token": bot.token, "name": bot.name, "game": bot.game}
+        ensure_bot_game_profile(bot.id, game, enabled=True, engine_mode=bot.engine_mode, persona_prompt=bot.persona_prompt)
+    return {"bot_id": bot.id, "token": bot.token, "name": bot.name, "game": bot.game, "enabled_games": enabled_games_for_bot(bot.id)}
 
 
 @app.get("/api/bots/me")
@@ -1120,10 +1315,14 @@ async def update_me(req: BotUpdateReq, bot: Bot = Depends(get_current_bot)) -> d
         updates = req.model_dump(exclude_unset=True)
         if "challenge_policy" in updates and updates["challenge_policy"] is not None:
             updates["challenge_policy"] = validate_challenge_policy(updates["challenge_policy"])
+        if "game" in updates and updates["game"] is not None:
+            updates["game"] = normalize_game(updates["game"])
         for key, value in updates.items():
             setattr(bot, key, value)
         bot.updated_at = time.time()
         save_bot(bot)
+        if "game" in updates and updates["game"] is not None:
+            ensure_bot_game_profile(bot.id, updates["game"], enabled=True, engine_mode=bot.engine_mode, persona_prompt=bot.persona_prompt)
     return {**bot_public(bot), "token_hint": token_hint(bot.token)}
 
 
@@ -1137,7 +1336,7 @@ async def list_bots(
 ) -> dict[str, Any]:
     refresh_state_from_db()
     game = normalize_game(game)
-    items = [b for b in bots.values() if b.is_public and b.is_enabled and b.game == game]
+    items = [b for b in bots.values() if b.is_public and b.is_enabled and bot_supports_game(b.id, game)]
     if q:
         q_lower = q.lower()
         items = [b for b in items if q_lower in b.name.lower() or q_lower in (b.description or "").lower() or q_lower in (b.chess_style or "").lower()]
@@ -1371,7 +1570,7 @@ async def queue_join(request: Request, game: str = DEFAULT_GAME, bot_id: str = D
     game = normalize_game(game)
     async with state_lock:
         ensure_bot_available(bot_id, game)
-        if bots[bot_id].game != game:
+        if not bot_supports_game(bot_id, game):
             raise HTTPException(status_code=400, detail="bot game mismatch")
         # Reject if already in queue
         if bot_id in match_queue_entries:
@@ -1493,7 +1692,7 @@ async def create_challenge(req: ChallengeReq, bot: Bot = Depends(get_current_bot
             raise HTTPException(status_code=404, detail="opponent bot not found")
         if req.opponent_bot_id == bot.id:
             raise HTTPException(status_code=400, detail="cannot challenge self")
-        if bot.game != game or bots[req.opponent_bot_id].game != game:
+        if not bot_supports_game(bot.id, game) or not bot_supports_game(req.opponent_bot_id, game):
             raise HTTPException(status_code=400, detail="bot game mismatch")
         ensure_bot_available(bot.id, game)
         ensure_bot_available(req.opponent_bot_id, game)
@@ -1743,6 +1942,330 @@ async def admin_bots_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "admin_bots.html", {"title": "后台账号管理"})
 
 
+@app.get("/doudizhu", response_class=HTMLResponse)
+async def doudizhu_cardroom_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "card_rooms_demo.html", {"title": "斗地主 CardRoom"})
+
+
+@app.get("/card-rooms-demo", response_class=HTMLResponse)
+async def card_rooms_demo_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "card_rooms_demo.html", {"title": "斗地主 CardRoom"})
+
+
+@app.post("/api/cards/doudizhu/demo")
+async def create_doudizhu_demo(req: CardRoomCreateReq) -> dict[str, Any]:
+    try:
+        state = doudizhu.new_state(req.players, seed=req.seed, landlord_index=req.landlord_index)
+        return {"state": state}
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/cards/doudizhu/demo/action")
+async def doudizhu_demo_action(req: CardActionReq, state: str) -> dict[str, Any]:
+    try:
+        raw, move = doudizhu.apply_action(state, req.player, req.action)
+        return {"state": doudizhu.loads_state(raw), "move": move}
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/cards/doudizhu/demo/new")
+async def create_doudizhu_demo_room(req: CardRoomCreateReq) -> dict[str, Any]:
+    try:
+        room_id = "cardroom_" + secrets.token_urlsafe(10).replace("-", "_")
+        state = doudizhu.new_state(req.players, seed=req.seed, landlord_index=req.landlord_index)
+        raw = doudizhu.dumps_state(state)
+        doudizhu_demo_rooms[room_id] = raw
+        return doudizhu_room_public(room_id, raw)
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/cards/doudizhu/demo/{room_id}")
+async def get_doudiz_demo_room_api(room_id: str) -> dict[str, Any]:
+    return doudizhu_room_public(room_id, get_doudizhu_demo_room(room_id))
+
+
+@app.post("/api/cards/doudizhu/demo/{room_id}/step")
+async def step_doudizhu_demo_room(room_id: str) -> dict[str, Any]:
+    raw = get_doudizhu_demo_room(room_id)
+    try:
+        new_raw, move = doudizhu.auto_step(raw)
+        doudizhu_demo_rooms[room_id] = new_raw
+        out = doudizhu_room_public(room_id, new_raw)
+        out["move"] = move
+        return out
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/cards/doudizhu/demo/{room_id}/auto-run")
+async def auto_run_doudizhu_demo_room(room_id: str, req: CardAutoRunReq | None = None) -> dict[str, Any]:
+    raw = get_doudizhu_demo_room(room_id)
+    max_steps = req.max_steps if req else 20
+    try:
+        new_raw, moves = doudizhu.auto_run(raw, max_steps=max_steps)
+        doudizhu_demo_rooms[room_id] = new_raw
+        out = doudizhu_room_public(room_id, new_raw)
+        state = out["state"]
+        steps_run = len(moves)
+        out["moves"] = moves
+        out["steps"] = steps_run
+        out["steps_run"] = steps_run
+        out["finished"] = state.get("phase") == "finished"
+        out["winner"] = state.get("winner")
+        return out
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/card-rooms")
+async def list_card_rooms(limit: int = Query(default=50, ge=1, le=100), offset: int = Query(default=0, ge=0), game: str | None = None) -> dict[str, Any]:
+    try:
+        return card_rooms.list_rooms(limit=limit, offset=offset, game=game)
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/card-rooms")
+async def create_card_room(req: CardRoomCreateReq) -> dict[str, Any]:
+    try:
+        return card_rooms.create_room(game=req.game, players=req.players, seed=req.seed, landlord_index=req.landlord_index)
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/card-rooms/pool")
+async def list_card_room_pool() -> dict[str, Any]:
+    return card_rooms.list_pool_slots()
+
+
+@app.post("/api/card-rooms/pool/{slot}/join")
+async def join_card_room_pool(slot: int, req: CardRoomPoolJoinReq) -> dict[str, Any]:
+    try:
+        return card_rooms.join_pool_slot(
+            slot,
+            controller_type=req.controller_type,
+            controller_id=req.controller_id,
+            display_name=req.display_name,
+        )
+    except card_rooms.CardRoomPoolError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/card-rooms/pool/{slot}/join-token")
+async def join_card_room_pool_with_token(slot: int, req: CardRoomPoolTokenJoinReq) -> dict[str, Any]:
+    bot = bot_from_plain_token(req.token)
+    if not bot_supports_game(bot.id, "doudizhu"):
+        raise HTTPException(status_code=403, detail="该 Bot 尚未启用斗地主，请先给账户添加 doudizhu 能力")
+    try:
+        payload = card_rooms.join_pool_slot(
+            slot,
+            controller_type="bot_token",
+            controller_id=bot.id,
+            display_name=req.display_name or bot.name,
+        )
+        out = card_room_token_join_payload(payload)
+        out["bot"] = {"bot_id": bot.id, "name": bot.name, "enabled_games": enabled_games_for_bot(bot.id)}
+        return out
+    except card_rooms.CardRoomPoolError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/card-rooms/pool/{slot}/leave")
+async def leave_card_room_pool(slot: int, req: CardRoomPoolJoinReq) -> dict[str, Any]:
+    try:
+        return card_rooms.leave_pool_slot(slot, controller_type=req.controller_type, controller_id=req.controller_id)
+    except card_rooms.CardRoomPoolError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+
+
+@app.post("/api/card-rooms/pool/{slot}/leave-token")
+async def leave_card_room_pool_with_token(slot: int, req: CardRoomPoolTokenJoinReq) -> dict[str, Any]:
+    bot = bot_from_plain_token(req.token)
+    try:
+        payload = card_rooms.leave_pool_slot(slot, controller_type="bot_token", controller_id=bot.id)
+        return card_room_token_join_payload(payload)
+    except card_rooms.CardRoomPoolError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+
+
+@app.post("/api/card-rooms/pool/{slot}/reset")
+async def reset_card_room_pool(slot: int) -> dict[str, Any]:
+    try:
+        return card_rooms.reset_pool_slot(slot)
+    except card_rooms.CardRoomPoolError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+
+
+@app.post("/api/card-rooms/pool/{slot}/start")
+async def start_card_room_pool(slot: int, req: CardRoomPoolStartReq | None = None) -> dict[str, Any]:
+    try:
+        return card_rooms.start_pool_slot(slot, seed=req.seed if req else None)
+    except card_rooms.CardRoomPoolError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="card room not found") from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/card-rooms/{room_id}")
+async def get_card_room(room_id: str) -> dict[str, Any]:
+    try:
+        return card_rooms.get_room(room_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="card room not found") from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/card-rooms/{room_id}/view")
+async def get_card_room_view(room_id: str, seat: int | str = Query(default=0), token: str | None = Query(default=None)) -> dict[str, Any]:
+    try:
+        return card_rooms.room_view(room_id, seat=seat, token=token)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="card room not found") from exc
+    except card_rooms.CardRoomAccessError as exc:
+        raise HTTPException(status_code=403, detail=exc.detail) from exc
+    except card_rooms.CardRoomActionError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/card-rooms/{room_id}/spectator")
+async def get_card_room_spectator(room_id: str) -> dict[str, Any]:
+    try:
+        return card_rooms.spectator_view(room_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="card room not found") from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/card-rooms/{room_id}/legal-actions")
+async def get_card_room_legal_actions(room_id: str, seat: int | str = Query(default=0), token: str | None = Query(default=None)) -> dict[str, Any]:
+    try:
+        return card_rooms.legal_actions(room_id, seat=seat, token=token)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="card room not found") from exc
+    except card_rooms.CardRoomAccessError as exc:
+        raise HTTPException(status_code=403, detail=exc.detail) from exc
+    except card_rooms.CardRoomActionError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/card-rooms/{room_id}/prompt")
+async def get_card_room_prompt(room_id: str, seat: int | str = Query(default=0), token: str | None = Query(default=None)) -> dict[str, Any]:
+    try:
+        return card_rooms.build_cardroom_prompt(room_id, seat=seat, token=token)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="card room not found") from exc
+    except card_rooms.CardRoomAccessError as exc:
+        raise HTTPException(status_code=403, detail=exc.detail) from exc
+    except card_rooms.CardRoomActionError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/card-rooms/{room_id}/review-action")
+async def review_card_room_action(room_id: str, req: CardRoomActionReq) -> dict[str, Any]:
+    try:
+        return card_rooms.review_cardroom_action(
+            room_id,
+            seat=req.seat,
+            candidate={
+                "action": req.action,
+                "cards": req.cards,
+                "reason": req.reason,
+                "speech": req.speech,
+            },
+            token=req.token,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="card room not found") from exc
+    except card_rooms.CardRoomAccessError as exc:
+        raise HTTPException(status_code=403, detail=exc.detail) from exc
+    except card_rooms.CardRoomActionError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/card-rooms/{room_id}/actions")
+async def apply_card_room_action(room_id: str, req: CardRoomActionReq) -> dict[str, Any]:
+    try:
+        return card_rooms.apply_room_action(
+            room_id,
+            seat=req.seat,
+            action=req.action,
+            cards=req.cards,
+            source=req.source,
+            reason=req.reason,
+            speech=req.speech,
+            retries=req.retries,
+            token=req.token,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="card room not found") from exc
+    except card_rooms.CardRoomAccessError as exc:
+        raise HTTPException(status_code=403, detail=exc.detail) from exc
+    except card_rooms.CardRoomActionError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/card-rooms/{room_id}/prompt-decision")
+async def apply_card_room_prompt_decision(room_id: str, req: CardRoomPromptDecisionReq) -> dict[str, Any]:
+    try:
+        return card_rooms.apply_reviewed_prompt_decision(
+            room_id,
+            seat=req.seat,
+            candidates=[candidate.model_dump() for candidate in req.candidates],
+            token=req.token,
+            max_retries=req.max_retries,
+            source=req.source,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="card room not found") from exc
+    except card_rooms.CardRoomAccessError as exc:
+        raise HTTPException(status_code=403, detail=exc.detail) from exc
+    except card_rooms.CardRoomActionError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/card-rooms/{room_id}/step")
+async def step_card_room(room_id: str) -> dict[str, Any]:
+    try:
+        return card_rooms.step_room(room_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="card room not found") from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/card-rooms/{room_id}/auto-run")
+async def auto_run_card_room(room_id: str, req: CardAutoRunReq | None = None) -> dict[str, Any]:
+    try:
+        return card_rooms.auto_run_room(room_id, max_steps=req.max_steps if req else 20)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="card room not found") from exc
+    except doudizhu.DouDizhuRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/matches/{match_id}", response_class=HTMLResponse)
 async def match_view_page(request: Request, match_id: str) -> HTMLResponse:
     if match_id not in matches:
@@ -1838,6 +2361,94 @@ async def admin_stop_all(_: None = Depends(require_admin)) -> dict[str, Any]:
             await emit(pid, "match_finished", data)
         await broadcast_match_sse(data["match_id"])
     return {"stopped": len(stopped), "matches": stopped}
+
+
+def resolve_go9_analyze_state(req: Go9AnalyzeReq) -> dict[str, Any]:
+    if req.match_id:
+        m = matches.get(req.match_id)
+        if not m:
+            raise HTTPException(status_code=404, detail="match not found")
+        if m.game != "go":
+            raise HTTPException(status_code=400, detail="match is not a go game")
+        raw: str | dict[str, Any] | None = m.fen
+    else:
+        raw = req.state if req.state is not None else req.fen
+    if raw is None:
+        raise HTTPException(status_code=400, detail="missing go state")
+    try:
+        return go9.loads_state(raw)
+    except go9.GoRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def heuristic_go9_move(state: dict[str, Any], legal: list[str]) -> tuple[str, dict[str, Any]]:
+    clean: list[str] = []
+    for move in legal:
+        value = (move or "").strip().lower()
+        if not value or value in clean:
+            continue
+        if value == go9.PASS:
+            clean.append(value)
+            continue
+        if not go9.is_legal_point(state, value):
+            raise HTTPException(status_code=400, detail=f"illegal go move in legal_moves: {value}")
+        clean.append(value)
+    if not clean:
+        raise HTTPException(status_code=400, detail="legal_moves is empty")
+    point_moves = [m for m in clean if m != go9.PASS]
+    if not point_moves:
+        return go9.PASS, {"fallback": "pass", "reason": "pass is the only legal move"}
+
+    center = (go9.SIZE - 1) / 2
+    preferred = {"e5", "d5", "e6", "f5", "e4", "d4", "f6", "d6", "f4", "c5", "g5", "e3", "e7"}
+
+    def score_move(move: str) -> tuple[float, str]:
+        row, col = go9.coord_to_rc(move)
+        dist = abs(row - center) + abs(col - center)
+        edge_distance = min(row, col, go9.SIZE - 1 - row, go9.SIZE - 1 - col)
+        occupied_neighbors = sum(1 for nr, nc in go9.neighbors(row, col) if state["board"][nr][nc] is not None)
+        preference_bonus = -2.0 if move in preferred else 0.0
+        edge_penalty = 0.35 if edge_distance == 0 else 0.0
+        corner_bonus = -0.15 if edge_distance == 0 and row in (0, go9.SIZE - 1) and col in (0, go9.SIZE - 1) else 0.0
+        contact_bonus = -0.18 * occupied_neighbors
+        return (dist + edge_penalty + preference_bonus + corner_bonus + contact_bonus, move)
+
+    best = min(point_moves, key=score_move)
+    return best, {"reason": "heuristic center-first legal move", "candidates": point_moves[:20]}
+
+
+@app.post("/api/go9/analyze")
+async def go9_analyze(req: Go9AnalyzeReq, bot: Bot = Depends(get_current_bot)) -> dict[str, Any]:
+    if not bot_supports_game(bot.id, "go"):
+        raise HTTPException(status_code=403, detail="bot does not support go")
+    state = resolve_go9_analyze_state(req)
+    if state.get("finished"):
+        raise HTTPException(status_code=400, detail="go game already finished")
+    try:
+        all_legal = go9.legal_moves(state)
+    except go9.GoRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    supplied = req.legal_moves if req.legal_moves is not None else all_legal
+    if not supplied:
+        raise HTTPException(status_code=400, detail="legal_moves is empty")
+    normalized_supplied = [(m or "").strip().lower() for m in supplied]
+    invalid = [m for m in normalized_supplied if m not in all_legal]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"illegal go move in legal_moves: {invalid[0]}")
+    best_move, notes = heuristic_go9_move(state, normalized_supplied)
+    return {
+        "game": "go",
+        "engine": "heuristic_go9",
+        "depth": req.depth,
+        "best_move": best_move,
+        "move": best_move,
+        "legal_moves": normalized_supplied,
+        "all_legal_moves_count": len(all_legal),
+        "score": go9.score(state),
+        "turn": state.get("turn"),
+        "notes": notes,
+        "fallback": best_move == go9.PASS,
+    }
 
 
 @app.post("/api/analyze")

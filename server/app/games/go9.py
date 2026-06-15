@@ -107,6 +107,61 @@ def group_and_liberties(board: list[list[str | None]], row: int, col: int) -> tu
     return group, liberties
 
 
+
+def is_legal_point(state_or_json: str | dict[str, Any], coord: str) -> bool:
+    """Return whether the current player may legally place at coord.
+
+    This intentionally implements only the local legality needed by the 9x9
+    arena bot flow: board bounds/occupancy, captures, and suicide prevention.
+    Ko/superko are not enforced.
+    """
+    try:
+        state = loads_state(state_or_json)
+        if state.get("finished"):
+            return False
+        color = state.get("turn", BLACK)
+        if color not in (BLACK, WHITE):
+            return False
+        row, col = coord_to_rc(coord)
+    except GoRuleError:
+        return False
+
+    board = copy.deepcopy(state["board"])
+    if board[row][col] is not None:
+        return False
+
+    board[row][col] = color
+    enemy = other(color)
+    checked_enemy_groups: set[tuple[int, int]] = set()
+    for nr, nc in neighbors(row, col):
+        if board[nr][nc] != enemy or (nr, nc) in checked_enemy_groups:
+            continue
+        group, libs = group_and_liberties(board, nr, nc)
+        checked_enemy_groups.update(group)
+        if not libs:
+            for gr, gc in group:
+                board[gr][gc] = None
+
+    _, own_libs = group_and_liberties(board, row, col)
+    return bool(own_libs)
+
+
+def legal_moves(state_or_json: str | dict[str, Any]) -> list[str]:
+    """List legal Go9 actions for the current state, including pass."""
+    state = loads_state(state_or_json)
+    if state.get("finished"):
+        return []
+    moves: list[str] = []
+    for row in range(SIZE):
+        for col in range(SIZE):
+            if state["board"][row][col] is not None:
+                continue
+            coord = rc_to_coord(row, col)
+            if is_legal_point(state, coord):
+                moves.append(coord)
+    moves.append(PASS)
+    return moves
+
 def score(state: dict[str, Any]) -> dict[str, int]:
     board = state["board"]
     captures = state.get("captures", {})

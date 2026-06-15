@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+{% block content %}
+<link rel="stylesheet" href="/static/card_rooms_demo.css?v=20260613-ddz-pool-v1">
+
+<section class="cr-demo-shell">
+  <header class="cr-hero">
+    <div class="cr-hero-copy">
+      <p class="cr-eyebrow">DouDizhu AI Table</p>
+      <h1>斗地主 AI 牌桌</h1>
+      <p class="cr-muted">三家 AI 实时对局，seat0 底部本家、seat1 左侧对手、seat2 右侧对手。AI/接口调试保留在底部开发者模式。</p>
+      <div class="cr-hero-badges">
+        <span>三家 AI 对战</span>
+        <span>游客观战</span>
+        <span>自动演示</span>
+      </div>
+    </div>
+    <div class="cr-hero-side">
+      <div class="cr-page-links">
+        <a class="btn" href="/arena">返回大厅</a>
+      </div>
+      <div class="cr-actions" aria-label="CardRoom 操作">
+        <button class="btn primary" id="newRoomBtn" type="button">新建房间</button>
+        <button class="btn" id="stepBtn" type="button">AI 走一步</button>
+        <button class="btn" id="autoRunBtn" type="button">自动跑 20 步</button>
+        <button class="btn" id="refreshBtn" type="button">刷新牌桌</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="cr-pool-panel" aria-label="斗地主 5 房间池">
+    <div class="cr-pool-title">
+      <div>
+        <p class="cr-eyebrow">Room Pool</p>
+        <h2>5 个固定房间</h2>
+        <p class="cr-muted">每个房间 3 个座位，满员自动开局并跳转到牌桌；地主随机。</p>
+      </div>
+      <div class="cr-pool-user">
+        <label>昵称
+          <input id="poolNameInput" maxlength="80" placeholder="游客 / QQ昵称 / Bot名">
+        </label>
+        <label>Bot Token 入座
+          <input id="poolTokenInput" maxlength="200" placeholder="粘贴 Bot Token，可留空游客入座" autocomplete="off">
+        </label>
+        <small>浏览器ID：<code id="poolControllerText">-</code></small>
+        <button class="btn" id="poolRefreshBtn" type="button">刷新房间池</button>
+      </div>
+    </div>
+    <div id="poolSlots" class="cr-pool-grid">
+      <div class="cr-empty">正在加载房间池…</div>
+    </div>
+  </section>
+
+  <section class="cr-table-shell" aria-live="polite">
+    <div class="cr-table-topbar">
+      <div>
+        <p class="cr-eyebrow">Live Table</p>
+        <h2>当前牌局</h2>
+      </div>
+      <p id="messageText" class="cr-message">等待操作。点“新建房间”开始。</p>
+    </div>
+
+    <div class="cr-table-layout">
+      <article class="cr-seat cr-seat-1" id="seat1Card">
+        <div class="cr-seat-head"><strong>左侧对手 · seat1</strong><span class="cr-role">-</span></div>
+        <div class="cr-hand-count">剩余：- 张</div>
+        <div class="cr-seat-meta">等待开局</div>
+        <div class="cr-seat-play-area">
+          <span class="cr-play-label">出牌区</span>
+          <div class="cr-play-zone"><span class="cr-empty">等待</span></div>
+        </div>
+        <div class="cr-card-row cr-seat-hand"><span class="cr-empty">等待发牌</span></div>
+      </article>
+
+      <article class="cr-seat cr-seat-0" id="seat0Card">
+        <div class="cr-seat-head"><strong>本家 · seat0</strong><span class="cr-role">-</span></div>
+        <div class="cr-hand-count">剩余：- 张</div>
+        <div class="cr-seat-meta">等待开局</div>
+        <div class="cr-seat-play-area">
+          <span class="cr-play-label">出牌区</span>
+          <div class="cr-play-zone"><span class="cr-empty">等待</span></div>
+        </div>
+        <div class="cr-card-row cr-seat-hand"><span class="cr-empty">等待发牌</span></div>
+      </article>
+
+      <section class="cr-center-panel" aria-label="中心牌桌状态">
+        <div class="cr-center-title">
+          <span>房间</span>
+          <strong id="roomIdText">未创建</strong>
+        </div>
+        <div class="cr-center-cards cr-bottom-area">
+          <div>
+            <p class="cr-label">底牌</p>
+            <div id="bottomCards" class="cr-card-row cr-center-card-row"><span class="cr-empty">-</span></div>
+          </div>
+          <div>
+            <p class="cr-label">上轮出牌</p>
+            <div id="lastPlayText" class="cr-last-play">-</div>
+          </div>
+        </div>
+        <div class="cr-status-grid" aria-label="牌局状态">
+          <div><span>玩法</span><strong id="gameText">斗地主</strong></div>
+          <div><span>状态</span><strong id="phaseText">-</strong></div>
+          <div><span>地主</span><strong id="landlordText">-</strong></div>
+          <div><span>当前出牌</span><strong id="currentSeatText">-</strong></div>
+          <div><span>连续不出</span><strong id="passCountText">0</strong></div>
+          <div><span>胜者</span><strong id="winnerText">-</strong></div>
+        </div>
+      </section>
+
+      <article class="cr-seat cr-seat-2" id="seat2Card">
+        <div class="cr-seat-head"><strong>右侧对手 · seat2</strong><span class="cr-role">-</span></div>
+        <div class="cr-hand-count">剩余：- 张</div>
+        <div class="cr-seat-meta">等待开局</div>
+        <div class="cr-seat-play-area">
+          <span class="cr-play-label">出牌区</span>
+          <div class="cr-play-zone"><span class="cr-empty">等待</span></div>
+        </div>
+        <div class="cr-card-row cr-seat-hand"><span class="cr-empty">等待发牌</span></div>
+      </article>
+    </div>
+  </section>
+
+  <details class="cr-dev-panel">
+    <summary>
+      <span>开发者模式 / AI 调试</span>
+      <small id="spectatorStatus">未加载</small>
+    </summary>
+
+    <section class="cr-spectator-panel" aria-label="游客观战完整手牌">
+      <div class="cr-spectator-head">
+        <div>
+          <p class="cr-eyebrow">Spectator</p>
+          <h2>游客完整手牌</h2>
+          <p class="cr-muted">仅用于观战和调试；主牌桌已同步使用这些数据渲染三家手牌。</p>
+        </div>
+      </div>
+      <div id="spectatorHands" class="cr-spectator-grid">
+        <div class="cr-empty">新开或刷新牌局后尝试读取游客观战接口。</div>
+      </div>
+    </section>
+
+    <section class="cr-llm-panel" aria-label="模拟 LLM 出牌和网站裁判审查">
+      <div class="cr-llm-head">
+        <div>
+          <p class="cr-eyebrow">AI Debug</p>
+          <h2>seat 视角 / 合法动作 / 提交 action</h2>
+          <p class="cr-muted">这里保留原有调试能力。展示牌面会美化，但提交给接口的 action 仍使用原始牌码。</p>
+        </div>
+        <label class="cr-seat-picker">
+          seat
+          <select id="llmSeatSelect">
+            <option value="0">0 / 本家</option>
+            <option value="1">1 / 左侧对手</option>
+            <option value="2">2 / 右侧对手</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="cr-llm-grid">
+        <label class="cr-json-box">
+          JSON action
+          <textarea id="llmActionInput" spellcheck="false">{"action":"play","cards":["3S"],"reason":"先出一张小牌探路","source":"manual_llm_demo"}</textarea>
+        </label>
+        <div class="cr-llm-controls">
+          <button class="btn" id="seatViewBtn" type="button">获取 seat 视角</button>
+          <button class="btn" id="legalActionsBtn" type="button">获取合法动作</button>
+          <button class="btn primary" id="submitLlmActionBtn" type="button">提交 action</button>
+          <button class="btn" id="passActionBtn" type="button">pass</button>
+        </div>
+      </div>
+
+      <div class="cr-llm-result" id="llmResultBox">
+        <strong>结果</strong>
+        <pre id="llmResultText">等待操作。</pre>
+      </div>
+    </section>
+
+    <section class="cr-history-panel">
+      <div class="cr-history-head">
+        <h2>最近动作</h2>
+        <span id="historyCount">0 条</span>
+      </div>
+      <ol id="historyList" class="cr-history-list">
+        <li class="cr-muted">暂无历史动作</li>
+      </ol>
+    </section>
+  </details>
+</section>
+
+<script src="/static/card_rooms_demo.js?v=20260613-ddz-pool-v1"></script>
+{% endblock %}

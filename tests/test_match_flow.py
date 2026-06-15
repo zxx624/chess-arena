@@ -221,7 +221,11 @@ async def test_register_me_and_list_bots() -> None:
         me_bot = me_body.get("bot") or me_body
         assert (me_bot.get("id") or me_bot.get("bot_id")) == bot.id
 
-        bots = await client.get("/api/bots", headers={"Authorization": f"Bearer {bot.token}"})
+        bots = await client.get(
+            "/api/bots",
+            params={"q": bot.name, "limit": 200},
+            headers={"Authorization": f"Bearer {bot.token}"},
+        )
         assert bots.status_code == 200, bots.text
         bots_body = bots.json()
         bot_items = bots_body.get("bots") if isinstance(bots_body, dict) else bots_body
